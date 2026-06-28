@@ -7,6 +7,7 @@
 //  exposes observable voice state for the panel UI.
 //
 
+import AppKit
 import AVFoundation
 import Combine
 import Foundation
@@ -17,6 +18,7 @@ import SwiftUI
 enum CompanionVoiceState {
     case idle
     case listening
+    case checking
     case processing
     case responding
 }
@@ -31,6 +33,12 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasMicrophonePermission = false
     @Published private(set) var hasScreenContentPermission = false
 
+    /// True when the system default input is a Bluetooth headset (e.g. AirPods).
+    /// Push-to-talk is disabled in this state because macOS Bluetooth mic
+    /// capture is unreliable through AVAudioEngine.
+    @Published private(set) var isBluetoothInputDeviceSelected = false
+    @Published private(set) var selectedInputDeviceName = ""
+
     /// Screen location (global AppKit coords) of a detected UI element the
     /// buddy should fly to and point at. Parsed from Claude's response;
     /// observed by BlueCursorView to trigger the flight animation.
@@ -41,6 +49,9 @@ final class CompanionManager: ObservableObject {
     /// Custom speech bubble text for the pointing animation. When set,
     /// BlueCursorView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
+
+    /// BlueCursorView observes this to replay pointing when the overlay remounts.
+    @Published private(set) var pointingRequestEpoch = 0
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
@@ -57,6 +68,11 @@ final class CompanionManager: ObservableObject {
     @Published var onboardingPromptOpacity: Double = 0.0
     @Published var showOnboardingPrompt: Bool = false
 
+    // MARK: - Response Panel (notch dropdown)
+
+    @Published private(set) var streamingResponseText: String = ""
+    @Published private(set) var isResponsePanelStreaming: Bool = false
+
     // MARK: - Onboarding Music
 
     private var onboardingMusicPlayer: AVAudioPlayer?
@@ -64,13 +80,15 @@ final class CompanionManager: ObservableObject {
 
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
+    let globalTypedCommandShortcutMonitor = GlobalTypedCommandShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    private lazy var commandPaletteWindowManager = ClickyCommandPaletteWindowManager(companionManager: self)
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    private static let workerBaseURL = "https://clicky-proxy.leoclicks.workers.dev"
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -80,17 +98,65 @@ final class CompanionManager: ObservableObject {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
 
+    let playbookManager = PlaybookManager()
+
+    private lazy var turnService: CompanionTurnService = {
+        CompanionTurnService(
+            claudeAPI: claudeAPI,
+            playbookManager: playbookManager
+        )
+    }()
+
+    private let sessionManager = CompanionSessionManager()
+
+    private lazy var sessionPlanningService: CompanionSessionPlanningService = {
+        CompanionSessionPlanningService(
+            claudeAPI: claudeAPI,
+            playbookManager: playbookManager
+        )
+    }()
+
+    private lazy var sessionCompletionMonitor: CompanionSessionCompletionMonitor = {
+        CompanionSessionCompletionMonitor(claudeAPI: claudeAPI)
+    }()
+
+    private lazy var sessionPollingController: CompanionSessionPollingController = {
+        CompanionSessionPollingController(completionMonitor: sessionCompletionMonitor)
+    }()
+
+    @Published private(set) var isWalkthroughActive = false
+    @Published private(set) var walkthroughStatusText: String?
+
+    /// Opens embedded WebView panels for stock charts and places lookups.
+    var resultWindowManager: ClickyResultWindowManager?
+
+    /// Opens PDF panels for knowledge-base source documents.
+    var documentWindowManager: ClickyDocumentWindowManager?
+
+    /// Opens floating panels for generated copyable content.
+    var copyableContentWindowManager: ClickyCopyableContentWindowManager?
+
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
+
+    /// Tracks when copyable code/command was last delivered for walkthrough routing.
+    private var lastCopyableDeliveryHistoryIndex: Int?
+    private var lastCopyableKind: ClickyCopyableContentPayload.Kind?
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
 
+    /// Bumped whenever the user interrupts or replaces an in-flight response.
+    /// Stale tasks compare their snapshot against this to avoid false error fallbacks.
+    private var responseEpoch = 0
+
     private var shortcutTransitionCancellable: AnyCancellable?
+    private var typedCommandShortcutCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
+    private var playbookManagerCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
@@ -116,11 +182,111 @@ final class CompanionManager: ObservableObject {
         claudeAPI.model = model
     }
 
-    /// User preference for whether the Clicky cursor should be shown.
-    /// When toggled off, the overlay is hidden and push-to-talk is disabled.
-    /// Persisted to UserDefaults so the choice survives app restarts.
+    func endWalkthrough() {
+        sessionPollingController.stopPolling()
+        _ = sessionManager.endWalkthrough(reason: .userDone)
+        invalidateCurrentResponse()
+        syncWalkthroughState()
+    }
+
+    private func syncWalkthroughState() {
+        if let session = sessionManager.activeSession {
+            isWalkthroughActive = true
+            walkthroughStatusText = {
+                var text = "\(session.plan.title) · step \(session.currentIndex + 1)/\(session.plan.steps.count)"
+                if session.coachingMode == .shadowing {
+                    text += " · watching"
+                }
+                return text
+            }()
+            sessionPollingController.startPolling(
+                sessionManager: sessionManager,
+                workflowManager: playbookManager,
+                shouldSkipAdvance: { [weak self] in
+                    self?.shouldDeferWalkthroughAutomation ?? false
+                },
+                onCheckStarted: { [weak self] in
+                    self?.beginWalkthroughChecking()
+                },
+                onCheckFinished: { [weak self] in
+                    self?.endWalkthroughChecking()
+                }
+            ) { [weak self] outcome in
+                self?.deliverWalkthroughOutcome(outcome)
+            }
+            ensurePointingOverlayVisible()
+        } else {
+            isWalkthroughActive = false
+            walkthroughStatusText = nil
+            sessionPollingController.stopPolling()
+        }
+    }
+
+    private func beginWalkthroughChecking() {
+        guard sessionManager.activeSession?.awaitingAdvance == true else { return }
+        guard voiceState == .idle else { return }
+        guard currentResponseTask == nil else { return }
+        voiceState = .checking
+    }
+
+    private var shouldDeferWalkthroughAutomation: Bool {
+        buddyDictationManager.isDictationInProgress
+            || buddyDictationManager.isFinalizingTranscript
+            || buddyDictationManager.isPreparingToRecord
+            || voiceState == .listening
+            || currentResponseTask != nil
+    }
+
+    private func endWalkthroughChecking() {
+        guard voiceState == .checking else { return }
+        guard currentResponseTask == nil else { return }
+        voiceState = .idle
+    }
+
+    private func deliverWalkthroughOutcome(_ outcome: CompanionSessionOutcome) {
+        sessionPollingController.stopPolling()
+        invalidateCurrentResponse()
+        let responseEpochAtStart = responseEpoch
+
+        currentResponseTask = Task {
+            defer {
+                if responseEpochAtStart == responseEpoch {
+                    currentResponseTask = nil
+                    if voiceState != .listening,
+                       !buddyDictationManager.isDictationInProgress,
+                       !elevenLabsTTSClient.isPlaying {
+                        voiceState = .idle
+                    }
+                    syncWalkthroughState()
+                }
+            }
+
+            guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+            voiceState = .processing
+            do {
+                try await deliverSessionOutcome(
+                    transcript: "",
+                    outcome: outcome,
+                    responseEpochAtStart: responseEpochAtStart
+                )
+            } catch {
+                if !Self.shouldSuppressResponseError(
+                    error,
+                    responseEpochAtStart: responseEpochAtStart,
+                    currentEpoch: responseEpoch
+                ) {
+                    print("⚠️ Walkthrough auto-advance error: \(error)")
+                }
+            }
+        }
+    }
+
+    /// When enabled, the pointer overlay stays visible at all times.
+    /// When disabled (default), the overlay appears only while Ctrl+Option is held
+    /// or through an active voice/pointing interaction, then fades out shortly after.
     @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
-        ? true
+        ? false
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
 
     func setClickyCursorEnabled(_ enabled: Bool) {
@@ -179,6 +345,8 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        bindTypedCommandShortcut()
+        bindPlaybookManagerObservation()
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
@@ -285,17 +453,49 @@ final class CompanionManager: ObservableObject {
         detectedElementScreenLocation = nil
         detectedElementDisplayFrame = nil
         detectedElementBubbleText = nil
+        scheduleTransientHideIfNeeded()
+    }
+
+    /// Keeps the transparent overlay windows mounted so pointing animations can run.
+    func ensurePointingOverlayVisible() {
+        transientHideTask?.cancel()
+        transientHideTask = nil
+
+        guard !isOverlayVisible else { return }
+
+        overlayWindowManager.hasShownOverlayBefore = true
+        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        isOverlayVisible = true
+    }
+
+    func publishElementPoint(_ renderedPoint: CompanionPointRenderer.RenderedPoint) {
+        ensurePointingOverlayVisible()
+        detectedElementDisplayFrame = renderedPoint.displayFrame
+        detectedElementScreenLocation = renderedPoint.globalLocation
+        pointingRequestEpoch += 1
+    }
+
+    func publishElementPoint(
+        _ renderedPoint: CompanionPointRenderer.RenderedPoint,
+        bubbleText: String?
+    ) {
+        detectedElementBubbleText = bubbleText
+        publishElementPoint(renderedPoint)
     }
 
     func stop() {
         globalPushToTalkShortcutMonitor.stop()
+        globalTypedCommandShortcutMonitor.stop()
+        commandPaletteWindowManager.hide()
         buddyDictationManager.cancelCurrentDictation()
+        buddyDictationManager.shutdown()
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
 
-        currentResponseTask?.cancel()
+        invalidateCurrentResponse()
         currentResponseTask = nil
         shortcutTransitionCancellable?.cancel()
+        typedCommandShortcutCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
@@ -313,8 +513,10 @@ final class CompanionManager: ObservableObject {
 
         if currentlyHasAccessibility {
             globalPushToTalkShortcutMonitor.start()
+            globalTypedCommandShortcutMonitor.start()
         } else {
             globalPushToTalkShortcutMonitor.stop()
+            globalTypedCommandShortcutMonitor.stop()
         }
 
         hasScreenRecordingPermission = WindowPositionManager.hasScreenRecordingPermission()
@@ -347,6 +549,44 @@ final class CompanionManager: ObservableObject {
 
         if !previouslyHadAll && allPermissionsGranted {
             ClickyAnalytics.trackAllPermissionsGranted()
+        }
+
+        refreshSelectedInputDevice()
+    }
+
+    func refreshSelectedInputDevice() {
+        let inputDeviceDescription = BuddyMicrophoneCaptureUtilities.defaultInputDeviceDescription()
+        let isBluetoothInput = BuddyMicrophoneCaptureUtilities.isDefaultInputDeviceBluetooth()
+
+        if selectedInputDeviceName != inputDeviceDescription {
+            selectedInputDeviceName = inputDeviceDescription
+        }
+
+        if isBluetoothInputDeviceSelected != isBluetoothInput {
+            isBluetoothInputDeviceSelected = isBluetoothInput
+            if isBluetoothInput {
+                print("🎙️ Bluetooth input detected (\(inputDeviceDescription)) — push-to-talk disabled")
+            }
+        }
+    }
+
+    var bluetoothInputWarningMessage: String {
+        let loweredName = selectedInputDeviceName.lowercased()
+        if loweredName.contains("airpod") {
+            return "AirPods can't be used as Clicky's microphone. Open Sound Settings and switch to your Mac's built-in mic instead."
+        }
+        return "Bluetooth microphones can't be used for voice input. Open Sound Settings and switch to your Mac's built-in mic instead."
+    }
+
+    func presentBluetoothInputWarning() {
+        streamingResponseText = bluetoothInputWarningMessage
+        isResponsePanelStreaming = false
+        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+    }
+
+    func openSoundInputSettings() {
+        if let soundSettingsURL = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension") {
+            NSWorkspace.shared.open(soundSettingsURL)
         }
     }
 
@@ -427,6 +667,75 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    private func bindPlaybookManagerObservation() {
+        playbookManagerCancellable = playbookManager.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+    }
+
+    func completeOnboarding() {
+        hasCompletedOnboarding = true
+        triggerOnboarding()
+    }
+
+    func requestMicrophonePermission() {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else { return }
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            Task { @MainActor [weak self] in
+                self?.hasMicrophonePermission = granted
+            }
+        }
+    }
+
+    func openAccessibilitySettings() {
+        WindowPositionManager.openAccessibilitySettings()
+    }
+
+    func openScreenRecordingSettings() {
+        WindowPositionManager.openScreenRecordingSettings()
+    }
+
+    func resetPlaybookRecordingFromHere() {
+        playbookManager.resetRecordingFromHere()
+    }
+
+    func togglePlaybookRecording() {
+        if playbookManager.isRecording {
+            Task {
+                await playbookManager.stopRecording(claudeAPI: claudeAPI)
+            }
+        } else {
+            playbookManager.startRecording()
+        }
+    }
+
+    func presentPlaybookImport(kind: PlaybookKind) {
+        playbookManager.presentImportPanel(kind: kind, claudeAPI: claudeAPI)
+    }
+
+    func startPlaybookWalkthrough(playbookID: String) {
+        guard let plan = CompanionSessionPlanBuilder.plan(
+            forPlaybookID: playbookID,
+            playbookManager: playbookManager
+        ) else { return }
+
+        _ = sessionManager.activatePlan(plan)
+        syncWalkthroughState()
+    }
+
+    func openPlaybookPDF(playbook: Playbook, fileURL: URL) {
+        documentWindowManager?.show(sources: [
+            ClickyKnowledgeSourceDocument(
+                documentID: playbook.id,
+                title: playbook.title,
+                fileURL: fileURL,
+                pageIndex: 0
+            ),
+        ])
+    }
+
     private func bindVoiceStateObservation() {
         voiceStateCancellable = buddyDictationManager.$isRecordingFromKeyboardShortcut
             .combineLatest(
@@ -436,28 +745,34 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isRecording, isFinalizing, isPreparing in
                 guard let self else { return }
-                // Don't override .responding — the AI response pipeline
-                // manages that state directly until streaming finishes.
+
+                // User speech always wins — even if Clicky is still in .responding
+                // from TTS or a prior response that didn't reset yet.
+                if isRecording {
+                    self.voiceState = .listening
+                    return
+                }
+
+                if isFinalizing || isPreparing {
+                    self.voiceState = .processing
+                    return
+                }
+
+                // While checking, responding, processing, or an active response task owns state.
+                if self.voiceState == .checking {
+                    return
+                }
+
+                // While a response task is running, the pipeline owns non-idle states.
+                if self.currentResponseTask != nil {
+                    return
+                }
+
+                // Don't snap to idle over an in-flight TTS playback window.
                 guard self.voiceState != .responding else { return }
 
-                if isFinalizing {
-                    self.voiceState = .processing
-                } else if isRecording {
-                    self.voiceState = .listening
-                } else if isPreparing {
-                    self.voiceState = .processing
-                } else {
-                    self.voiceState = .idle
-                    // If the user pressed and released the hotkey without
-                    // saying anything, no response task runs — schedule the
-                    // transient hide here so the overlay doesn't get stuck.
-                    // Only do this when no response is in flight, otherwise
-                    // the brief idle gap between recording and processing
-                    // would prematurely hide the overlay.
-                    if self.currentResponseTask == nil {
-                        self.scheduleTransientHideIfNeeded()
-                    }
-                }
+                self.voiceState = .idle
+                self.scheduleTransientHideIfNeeded()
             }
     }
 
@@ -470,30 +785,58 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    private func bindTypedCommandShortcut() {
+        typedCommandShortcutCancellable = globalTypedCommandShortcutMonitor
+            .togglePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.toggleCommandPalette()
+            }
+    }
+
+    func toggleCommandPalette() {
+        commandPaletteWindowManager.toggle()
+    }
+
+    func submitTypedRequest(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        lastTranscript = trimmed
+        print("⌨️ Companion received typed request: \(trimmed)")
+
+        transientHideTask?.cancel()
+        transientHideTask = nil
+
+        ensurePointingOverlayVisible()
+
+        sendTranscriptToClaude(transcript: trimmed)
+    }
+
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
         switch transition {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
-            // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
+
+            if isBluetoothInputDeviceSelected {
+                print("🎙️ Push-to-talk blocked — Bluetooth input not supported (\(selectedInputDeviceName))")
+                presentBluetoothInputWarning()
+                return
+            }
 
             // Cancel any pending transient hide so the overlay stays visible
             transientHideTask?.cancel()
             transientHideTask = nil
 
-            // If the cursor is hidden, bring it back transiently for this interaction
-            if !isClickyCursorEnabled && !isOverlayVisible {
-                overlayWindowManager.hasShownOverlayBefore = true
-                overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
-                isOverlayVisible = true
-            }
+            // Show the overlay for any voice interaction, including transient mode.
+            ensurePointingOverlayVisible()
 
             // Dismiss the menu bar panel so it doesn't cover the screen
             NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
 
             // Cancel any in-progress response and TTS from a previous utterance
-            currentResponseTask?.cancel()
-            elevenLabsTTSClient.stopPlayback()
+            invalidateCurrentResponse()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -521,7 +864,11 @@ final class CompanionManager: ObservableObject {
                         self?.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
                         ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
-                        self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                        if self?.playbookManager.isRecording == true {
+                            self?.playbookManager.attachNarration(finalTranscript)
+                            return
+                        }
+                        self?.sendTranscriptToClaude(transcript: finalTranscript)
                     }
                 )
             }
@@ -534,225 +881,819 @@ final class CompanionManager: ObservableObject {
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+            scheduleTransientHideIfNeeded()
         case .none:
             break
         }
     }
 
-    // MARK: - Companion Prompt
-
-    private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
-
-    rules:
-    - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
-    - all lowercase, casual, warm. no emojis.
-    - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
-    - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
-    - if the user's question relates to what's on their screen, reference specific things you see.
-    - if the screenshot doesn't seem relevant to their question, just answer the question directly.
-    - you can help with anything — coding, writing, general knowledge, brainstorming.
-    - never say "simply" or "just".
-    - don't read out code verbatim. describe what the code does or what needs to change conversationally.
-    - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
-    - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
-    - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
-
-    element pointing:
-    you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
-
-    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
-
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
-
-    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
-
-    if pointing wouldn't help, append [POINT:none].
-
-    examples:
-    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
-    - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
-    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
-    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
-    """
-
     // MARK: - AI Response Pipeline
 
-    /// Captures a screenshot, sends it along with the transcript to Claude,
-    /// and plays the response aloud via ElevenLabs TTS. The cursor stays in
-    /// the spinner/processing state until TTS audio begins playing.
-    /// Claude's response may include a [POINT:x,y:label] tag which triggers
-    /// the buddy to fly to that element on screen.
-    private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
-        currentResponseTask?.cancel()
-        elevenLabsTTSClient.stopPlayback()
+    /// Resolves route then runs the matching voice pipeline. Default is the unified agent turn.
+    private func sendTranscriptToClaude(transcript: String) {
+        invalidateCurrentResponse()
+        sessionPollingController.stopPolling()
+        let responseEpochAtStart = responseEpoch
 
         currentResponseTask = Task {
-            // Stay in processing (spinner) state — no streaming text displayed
-            voiceState = .processing
-
-            do {
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-
-                guard !Task.isCancelled else { return }
-
-                // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
-                }
-
-                // Pass conversation history so Claude remembers prior exchanges
-                let historyForAPI = conversationHistory.map { entry in
-                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
-                }
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
-                    }
-                )
-
-                guard !Task.isCancelled else { return }
-
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-                let spokenText = parseResult.spokenText
-
-                // Handle element pointing if Claude returned coordinates.
-                // Switch to idle BEFORE setting the location so the triangle
-                // becomes visible and can fly to the target. Without this, the
-                // spinner hides the triangle and the flight animation is invisible.
-                let hasPointCoordinate = parseResult.coordinate != nil
-                if hasPointCoordinate {
-                    voiceState = .idle
-                }
-
-                // Pick the screen capture matching Claude's screen number,
-                // falling back to the cursor screen if not specified.
-                let targetScreenCapture: CompanionScreenCapture? = {
-                    if let screenNumber = parseResult.screenNumber,
-                       screenNumber >= 1 && screenNumber <= screenCaptures.count {
-                        return screenCaptures[screenNumber - 1]
-                    }
-                    return screenCaptures.first(where: { $0.isCursorScreen })
-                }()
-
-                if let pointCoordinate = parseResult.coordinate,
-                   let targetScreenCapture {
-                    // Claude's coordinates are in the screenshot's pixel space
-                    // (top-left origin, e.g. 1280x831). Scale to the display's
-                    // point space (e.g. 1512x982), then convert to AppKit global coords.
-                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
-                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
-                    let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
-                    let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
-                    let displayFrame = targetScreenCapture.displayFrame
-
-                    // Clamp to screenshot coordinate space
-                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-
-                    // Scale from screenshot pixels to display points
-                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-
-                    // Convert from top-left origin (screenshot) to bottom-left origin (AppKit)
-                    let appKitY = displayHeight - displayLocalY
-
-                    // Convert display-local coords to global screen coords
-                    let globalLocation = CGPoint(
-                        x: displayLocalX + displayFrame.origin.x,
-                        y: appKitY + displayFrame.origin.y
-                    )
-
-                    detectedElementScreenLocation = globalLocation
-                    detectedElementDisplayFrame = displayFrame
-                    ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
-                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
-                } else {
-                    print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
-                }
-
-                // Save this exchange to conversation history (with the point tag
-                // stripped so it doesn't confuse future context)
-                conversationHistory.append((
-                    userTranscript: transcript,
-                    assistantResponse: spokenText
-                ))
-
-                // Keep only the last 10 exchanges to avoid unbounded context growth
-                if conversationHistory.count > 10 {
-                    conversationHistory.removeFirst(conversationHistory.count - 10)
-                }
-
-                print("🧠 Conversation history: \(conversationHistory.count) exchanges")
-
-                ClickyAnalytics.trackAIResponseReceived(response: spokenText)
-
-                // Play the response via TTS. Keep the spinner (processing state)
-                // until the audio actually starts playing, then switch to responding.
-                if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
-                        // speakText returns after player.play() — audio is now playing
-                        voiceState = .responding
-                    } catch {
-                        ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
-                        speakCreditsErrorFallback()
+            defer {
+                if responseEpochAtStart == responseEpoch {
+                    currentResponseTask = nil
+                    if voiceState != .listening,
+                       !buddyDictationManager.isDictationInProgress {
+                        voiceState = .idle
+                        scheduleTransientHideIfNeeded()
                     }
                 }
-            } catch is CancellationError {
-                // User spoke again — response was interrupted
-            } catch {
-                ClickyAnalytics.trackResponseError(error: error.localizedDescription)
-                print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
             }
 
-            if !Task.isCancelled {
-                voiceState = .idle
-                scheduleTransientHideIfNeeded()
+            voiceState = .processing
+            prepareResponsePanel()
+
+            do {
+                if sessionPlanningService.pendingClarification != nil {
+                    try await deliverPendingPlanningResponse(
+                        transcript: transcript,
+                        responseEpochAtStart: responseEpochAtStart
+                    )
+                    return
+                }
+
+                if let retryTranscript = sessionPlanningService.pendingRetryTranscript,
+                   CompanionSessionPlanningBriefFormatter.shouldRetryFailedPlanning(transcript) {
+                    sessionPlanningService.clearPendingRetry()
+                    try await deliverPlannedSessionStart(
+                        transcript: retryTranscript,
+                        responseEpochAtStart: responseEpochAtStart
+                    )
+                    return
+                }
+
+                if let sessionOutcome = await sessionManager.process(
+                    transcript: transcript,
+                    workflowManager: playbookManager,
+                    completionMonitor: sessionCompletionMonitor,
+                    routingContext: walkthroughRoutingContext()
+                ) {
+                    switch sessionOutcome {
+                    case .needsPlan(let planningTranscript):
+                        try await deliverPlannedSessionStart(
+                            transcript: planningTranscript,
+                            responseEpochAtStart: responseEpochAtStart
+                        )
+
+                    case .exitAndContinue(let remainingTranscript):
+                        syncWalkthroughState()
+                        let command = ClickyVoiceSessionPhrases.commandAfterWalkthroughExit(
+                            in: remainingTranscript
+                        )
+                        try await deliverVoiceRoute(
+                            transcript: command,
+                            responseEpochAtStart: responseEpochAtStart
+                        )
+
+                    default:
+                        try await deliverSessionOutcome(
+                            transcript: transcript,
+                            outcome: sessionOutcome,
+                            responseEpochAtStart: responseEpochAtStart
+                        )
+                        syncWalkthroughState()
+                    }
+                    return
+                }
+
+                try await deliverVoiceRoute(
+                    transcript: transcript,
+                    responseEpochAtStart: responseEpochAtStart
+                )
+            } catch {
+                if Self.shouldSuppressResponseError(
+                    error,
+                    responseEpochAtStart: responseEpochAtStart,
+                    currentEpoch: responseEpoch
+                ) {
+                    print("🎙️ Voice response interrupted")
+                    finishResponsePanelStream()
+                    return
+                }
+                ClickyAnalytics.trackResponseError(error: error.localizedDescription)
+                print("⚠️ Companion response error: \(error)")
+                finishResponsePanelStream()
+                speakCreditsErrorFallback()
             }
         }
     }
 
-    /// If the cursor is in transient mode (user toggled "Show Clicky" off),
-    /// waits for TTS playback and any pointing animation to finish, then
-    /// fades out the overlay after a 1-second pause. Cancelled automatically
-    /// if the user starts another push-to-talk interaction.
+    /// Cancels in-flight voice response work and marks any pending task as stale.
+    private func invalidateCurrentResponse() {
+        responseEpoch += 1
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        elevenLabsTTSClient.stopPlayback()
+        isResponsePanelStreaming = false
+    }
+
+    // MARK: - Response Panel Streaming
+
+    func prepareResponsePanel() {
+        streamingResponseText = ""
+        isResponsePanelStreaming = true
+        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+    }
+
+    func finishResponsePanelStream() {
+        isResponsePanelStreaming = false
+    }
+
+    private func streamSpokenTextToPanel(
+        _ text: String,
+        responseEpochAtStart: Int,
+        speechDuration: TimeInterval
+    ) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let words = trimmed
+            .split(separator: " ", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard !words.isEmpty else { return }
+
+        let streamDuration = max(speechDuration * 0.95, Double(words.count) * 0.05)
+        let delayPerWord = streamDuration / Double(words.count)
+
+        for (index, word) in words.enumerated() {
+            guard responseEpochAtStart == responseEpoch else { return }
+            if index > 0 {
+                streamingResponseText += " "
+            }
+            streamingResponseText += word
+            if index < words.count - 1 {
+                try? await Task.sleep(nanoseconds: UInt64(delayPerWord * 1_000_000_000))
+            }
+        }
+    }
+
+    private func waitForPlaybackToFinish(responseEpochAtStart: Int) async throws {
+        while elevenLabsTTSClient.isPlaying {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            try Task.checkCancellation()
+            guard responseEpochAtStart == responseEpoch else { return }
+        }
+    }
+
+    private func speakAndStreamToPanel(
+        _ spokenText: String,
+        responseEpochAtStart: Int,
+        keepProcessingIndicatorDuringPlayback: Bool = false
+    ) async throws {
+        let trimmed = spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        streamingResponseText = ""
+        isResponsePanelStreaming = true
+
+        do {
+            voiceState = .processing
+            let speechDuration = try await elevenLabsTTSClient.speakText(trimmed)
+            guard responseEpochAtStart == responseEpoch else { return }
+
+            if !keepProcessingIndicatorDuringPlayback {
+                voiceState = .responding
+            }
+
+            async let panelStream: Void = streamSpokenTextToPanel(
+                trimmed,
+                responseEpochAtStart: responseEpochAtStart,
+                speechDuration: max(speechDuration, 0.25)
+            )
+            async let playbackWait: Void = waitForPlaybackToFinish(responseEpochAtStart: responseEpochAtStart)
+            try await (panelStream, playbackWait)
+        } catch {
+            if Self.shouldSuppressResponseError(
+                error,
+                responseEpochAtStart: responseEpochAtStart,
+                currentEpoch: responseEpoch
+            ) {
+                print("🔊 TTS interrupted")
+                return
+            }
+            ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+            print("⚠️ ElevenLabs TTS error: \(error)")
+            speakCreditsErrorFallback()
+        }
+    }
+
+    private func deliverVoiceRoute(
+        transcript: String,
+        responseEpochAtStart: Int
+    ) async throws {
+        if let compoundSteps = CompanionSessionPlanBuilder.compoundSteps(from: transcript) {
+            let spokenText = await CompanionSessionRunner.executeCompoundSteps(compoundSteps)
+            guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+            appendExchangeToConversationHistory(
+                userTranscript: transcript,
+                assistantResponse: spokenText
+            )
+            ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+            try await speakAndStreamToPanel(spokenText, responseEpochAtStart: responseEpochAtStart)
+            finishResponsePanelStream()
+            return
+        }
+
+        let routeContext = CompanionVoiceRouteContext(
+            uploadedDocumentCount: playbookManager.playbookCount,
+            workflowScreenCount: playbookManager.playbooks.reduce(0) { $0 + $1.stepCount }
+        )
+
+        let decision = CompanionVoiceRouter.resolve(
+            transcript: transcript,
+            context: routeContext
+        )
+
+        print("🎙️ Voice route: \(decision.route.rawValue) (\(decision.reason))")
+
+        switch decision.route {
+        case .quickLocal:
+            let spokenText = decision.cannedResponse ?? "okay."
+            try await deliverTextOnlyResponse(
+                transcript: transcript,
+                spokenText: spokenText,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .intro:
+            let spokenText = try await fetchTextOnlyResponse(
+                transcript: transcript,
+                systemPrompt: CompanionAgentPrompt.introOnly,
+                model: CompanionAgentPrompt.introModel
+            )
+            try await deliverTextOnlyResponse(
+                transcript: transcript,
+                spokenText: spokenText,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .appAction:
+            guard let appAction = decision.appAction else {
+                try await deliverAgentResponse(
+                    transcript: transcript,
+                    responseEpochAtStart: responseEpochAtStart
+                )
+                return
+            }
+            try await deliverAppActionResponse(
+                transcript: transcript,
+                action: appAction,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .agent:
+            try await deliverAgentResponse(
+                transcript: transcript,
+                responseEpochAtStart: responseEpochAtStart
+            )
+        }
+    }
+
+    private func deliverPendingPlanningResponse(
+        transcript: String,
+        responseEpochAtStart: Int
+    ) async throws {
+        guard let pending = sessionPlanningService.pendingClarification else { return }
+
+        if ClickyVoiceSessionPhrases.isCancel(transcript) {
+            sessionPlanningService.clearPendingClarification()
+            try await deliverTextOnlyResponse(
+                transcript: transcript,
+                spokenText: "no problem, we can pick this up later.",
+                responseEpochAtStart: responseEpochAtStart
+            )
+            return
+        }
+
+        if CompanionSessionPlanningBriefFormatter.shouldAbandonPendingClarification(
+            transcript,
+            pending: pending
+        ) {
+            sessionPlanningService.clearPendingClarification()
+            try await deliverVoiceRoute(
+                transcript: transcript,
+                responseEpochAtStart: responseEpochAtStart
+            )
+            return
+        }
+
+        voiceState = .processing
+
+        do {
+            let result = try await sessionPlanningService.resumePendingPlan(with: transcript)
+            guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+            switch result {
+            case .needsClarification(let clarification):
+                try await deliverTextOnlyResponse(
+                    transcript: transcript,
+                    spokenText: clarification.spokenPrompt,
+                    responseEpochAtStart: responseEpochAtStart
+                )
+
+            case .plan(let plan):
+                let activatedOutcome = sessionManager.activatePlan(plan)
+                try await deliverSessionOutcome(
+                    transcript: transcript,
+                    outcome: activatedOutcome,
+                    responseEpochAtStart: responseEpochAtStart
+                )
+                syncWalkthroughState()
+            }
+        } catch {
+            if Self.shouldSuppressResponseError(
+                error,
+                responseEpochAtStart: responseEpochAtStart,
+                currentEpoch: responseEpoch
+            ) {
+                return
+            }
+            print("⚠️ Session planning resume failed: \(error.localizedDescription) — falling back to agent")
+            sessionPlanningService.clearPendingClarification()
+            try await deliverAgentResponse(
+                transcript: transcript,
+                responseEpochAtStart: responseEpochAtStart
+            )
+        }
+    }
+
+    private func deliverPlannedSessionStart(
+        transcript: String,
+        responseEpochAtStart: Int
+    ) async throws {
+        voiceState = .processing
+        try await speakResponseText(
+            "let me break this down.",
+            responseEpochAtStart: responseEpochAtStart,
+            keepProcessingIndicatorDuringPlayback: true
+        )
+        guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+        appendExchangeToConversationHistory(
+            userTranscript: transcript,
+            assistantResponse: "let me break this down."
+        )
+        ClickyAnalytics.trackAIResponseReceived(response: "let me break this down.")
+
+        voiceState = .processing
+
+        do {
+            let result = try await sessionPlanningService.buildPlan(transcript: transcript)
+            guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+            switch result {
+            case .needsClarification(let clarification):
+                try await deliverTextOnlyResponse(
+                    transcript: transcript,
+                    spokenText: clarification.spokenPrompt,
+                    responseEpochAtStart: responseEpochAtStart
+                )
+
+            case .plan(let plan):
+                let activatedOutcome = sessionManager.activatePlan(plan)
+                try await deliverSessionOutcome(
+                    transcript: transcript,
+                    outcome: activatedOutcome,
+                    responseEpochAtStart: responseEpochAtStart
+                )
+                syncWalkthroughState()
+            }
+        } catch {
+            if Self.shouldSuppressResponseError(
+                error,
+                responseEpochAtStart: responseEpochAtStart,
+                currentEpoch: responseEpoch
+            ) {
+                return
+            }
+            print("⚠️ Session planning failed: \(error.localizedDescription) — falling back to agent")
+            sessionPlanningService.markPendingRetry(transcript: transcript)
+            try await deliverAgentResponse(
+                transcript: transcript,
+                responseEpochAtStart: responseEpochAtStart
+            )
+        }
+    }
+
+    private func deliverSessionOutcome(
+        transcript: String,
+        outcome: CompanionSessionOutcome,
+        responseEpochAtStart: Int
+    ) async throws {
+        switch outcome {
+        case .speak(let spokenText, _):
+            try await deliverTextOnlyResponse(
+                transcript: transcript,
+                spokenText: spokenText,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .runCompoundSteps(let steps):
+            let spokenText = await CompanionSessionRunner.executeCompoundSteps(steps)
+            guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+            appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: spokenText)
+            ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+            try await speakAndStreamToPanel(spokenText, responseEpochAtStart: responseEpochAtStart)
+            finishResponsePanelStream()
+
+        case .agentTurn(let question, let session):
+            try await deliverAgentResponse(
+                transcript: question,
+                responseEpochAtStart: responseEpochAtStart,
+                pinnedProcedureSession: session
+            )
+
+        case .ended(let spokenText):
+            try await deliverTextOnlyResponse(
+                transcript: transcript,
+                spokenText: spokenText,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .needsPlan(let planningTranscript):
+            try await deliverPlannedSessionStart(
+                transcript: planningTranscript,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .executeGuideStep(let session):
+            try await deliverGuideStepResponse(
+                transcript: transcript,
+                session: session,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .autoAdvanced(let transition, let session):
+            if session.coachingMode == .shadowing {
+                syncWalkthroughState()
+                return
+            }
+            if let transition, !transition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try await speakResponseText(transition, responseEpochAtStart: responseEpochAtStart)
+            }
+            guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+            let nextOutcome = sessionManager.presentCurrentStep()
+            try await deliverSessionOutcome(
+                transcript: transcript,
+                outcome: nextOutcome,
+                responseEpochAtStart: responseEpochAtStart
+            )
+
+        case .exitAndContinue(let remainingTranscript):
+            syncWalkthroughState()
+            try await deliverVoiceRoute(
+                transcript: remainingTranscript,
+                responseEpochAtStart: responseEpochAtStart
+            )
+        }
+    }
+
+    private func deliverGuideStepResponse(
+        transcript: String,
+        session: CompanionActiveSession,
+        responseEpochAtStart: Int
+    ) async throws {
+        voiceState = .processing
+
+        let delivery = try await turnService.runGuideStepTurn(
+            session: session,
+            model: selectedModel,
+            capabilityContext: makeCapabilityContext()
+        )
+
+        guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+        sessionManager.markGuideStepPresented()
+        syncWalkthroughState()
+
+        let guideTranscript = transcript.isEmpty
+            ? "walkthrough step \(session.currentIndex + 1)"
+            : transcript
+
+        try await applyAgentTurnResult(
+            transcript: guideTranscript,
+            delivery: delivery,
+            responseEpochAtStart: responseEpochAtStart
+        )
+    }
+
+    private func deliverAppActionResponse(
+        transcript: String,
+        action: ClickyAppAction,
+        responseEpochAtStart: Int
+    ) async throws {
+        guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+        let spokenText = await ClickyAppActionExecutor.execute(
+            action,
+            context: makeCapabilityContext()
+        )
+        guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+        appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: spokenText)
+        ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+
+        try await speakAndStreamToPanel(spokenText, responseEpochAtStart: responseEpochAtStart)
+        finishResponsePanelStream()
+    }
+
+    private func deliverAgentResponse(
+        transcript: String,
+        responseEpochAtStart: Int,
+        pinnedProcedureSession: CompanionActiveSession? = nil
+    ) async throws {
+        let delivery = try await turnService.runAgentTurn(
+            transcript: transcript,
+            conversationHistory: conversationHistoryForAPI(),
+            model: selectedModel,
+            capabilityContext: makeCapabilityContext(),
+            pinnedProcedureSession: pinnedProcedureSession
+        )
+
+        guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+        try await applyAgentTurnResult(
+            transcript: transcript,
+            delivery: delivery,
+            responseEpochAtStart: responseEpochAtStart
+        )
+    }
+
+    private func applyAgentTurnResult(
+        transcript: String,
+        delivery: CompanionTurnService.AgentTurnDelivery,
+        responseEpochAtStart: Int
+    ) async throws {
+        let result = delivery.result
+        let cursorScreenCapture = delivery.cursorScreenCapture
+        let spokenText = CompanionAgentActionSpeech.resolveSpokenText(
+            modelText: result.spokenText,
+            executedActions: [],
+            effects: CompanionTurnEffects(
+                pointTarget: result.pointTarget,
+                panelPayload: result.panelPayload
+            )
+        )
+
+        if result.pointTarget != nil, spokenText.isEmpty {
+            voiceState = .idle
+        }
+
+        if let pointTarget = result.pointTarget {
+            let renderedPoint = CompanionPointRenderer.render(
+                pointTarget: pointTarget,
+                on: cursorScreenCapture
+            )
+            publishElementPoint(renderedPoint)
+            ClickyAnalytics.trackElementPointed(elementLabel: renderedPoint.label)
+            print("🎯 Element pointing: (\(pointTarget.x), \(pointTarget.y)) → \"\(renderedPoint.label)\"")
+        } else {
+            print("🎯 Element pointing: none")
+        }
+
+        appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: spokenText)
+        ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+
+        if let panelPayload = result.panelPayload {
+            resultWindowManager?.show(panelPayload)
+        }
+
+        // Knowledge-base PDF panels disabled — responses stream in the notch panel instead.
+        // let sourceDocuments = turnService.sourceDocumentsToPresent(for: transcript)
+        // if !sourceDocuments.isEmpty {
+        //     documentWindowManager?.show(sources: sourceDocuments)
+        // }
+
+        guard !spokenText.isEmpty else {
+            finishResponsePanelStream()
+            return
+        }
+
+        try await speakAndStreamToPanel(spokenText, responseEpochAtStart: responseEpochAtStart)
+        finishResponsePanelStream()
+    }
+
+    private func makeCapabilityContext(
+        screenCapture: CompanionScreenCapture? = nil
+    ) -> CompanionCapabilityContext {
+        var context = CompanionCapabilityContext(
+            screenCapture: screenCapture,
+            documentWindowManager: documentWindowManager,
+            resultWindowManager: resultWindowManager,
+            copyableContentWindowManager: copyableContentWindowManager
+        )
+        context.onCopyableContentDelivered = { [weak self] payload in
+            self?.noteCopyableContentDelivered(payload)
+        }
+        return context
+    }
+
+    private func noteCopyableContentDelivered(_ payload: ClickyCopyableContentPayload) {
+        lastCopyableDeliveryHistoryIndex = conversationHistory.count
+        lastCopyableKind = payload.kind
+    }
+
+    private func walkthroughRoutingContext() -> CompanionWalkthroughRoutingContext {
+        let recentCopyableKind: ClickyCopyableContentPayload.Kind?
+        if let deliveryIndex = lastCopyableDeliveryHistoryIndex,
+           conversationHistory.count - deliveryIndex <= 2 {
+            recentCopyableKind = lastCopyableKind
+        } else {
+            recentCopyableKind = nil
+        }
+
+        let recentExchanges = conversationHistory.suffix(3).map {
+            (user: $0.userTranscript, assistant: $0.assistantResponse)
+        }
+
+        return CompanionWalkthroughRoutingContext(
+            recentExchanges: recentExchanges,
+            recentCopyableKind: recentCopyableKind
+        )
+    }
+
+    private func conversationHistoryForAPI() -> [(userPlaceholder: String, assistantResponse: String)] {
+        conversationHistory.compactMap { entry in
+            let user = entry.userTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+            let assistant = entry.assistantResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !user.isEmpty, !assistant.isEmpty else { return nil }
+            return (userPlaceholder: user, assistantResponse: assistant)
+        }
+    }
+
+    private func appendExchangeToConversationHistory(userTranscript: String, assistantResponse: String) {
+        let user = userTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let assistant = assistantResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty, !assistant.isEmpty else {
+            print("🧠 Conversation history: skipped empty exchange (user=\(user.isEmpty), assistant=\(assistant.isEmpty))")
+            return
+        }
+
+        conversationHistory.append((
+            userTranscript: user,
+            assistantResponse: assistant
+        ))
+
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
+        }
+
+        print("🧠 Conversation history: \(conversationHistory.count) exchanges")
+    }
+
+    private func fetchTextOnlyResponse(
+        transcript: String,
+        systemPrompt: String,
+        model: String
+    ) async throws -> String {
+        let (fullResponseText, _) = try await claudeAPI.sendTextStreaming(
+            systemPrompt: systemPrompt,
+            conversationHistory: conversationHistoryForAPI(),
+            userPrompt: transcript,
+            model: model,
+            onTextChunk: { _ in }
+        )
+        return fullResponseText
+    }
+
+    private func deliverTextOnlyResponse(
+        transcript: String,
+        spokenText: String,
+        responseEpochAtStart: Int
+    ) async throws {
+        guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
+
+        let trimmedSpokenText = spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: trimmedSpokenText)
+        ClickyAnalytics.trackAIResponseReceived(response: trimmedSpokenText)
+
+        guard !trimmedSpokenText.isEmpty else {
+            finishResponsePanelStream()
+            return
+        }
+
+        try await speakAndStreamToPanel(trimmedSpokenText, responseEpochAtStart: responseEpochAtStart)
+        finishResponsePanelStream()
+    }
+
+    private func speakResponseText(
+        _ spokenText: String,
+        responseEpochAtStart: Int,
+        keepProcessingIndicatorDuringPlayback: Bool = false
+    ) async throws {
+        guard !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        do {
+            voiceState = .processing
+            try await elevenLabsTTSClient.speakText(spokenText)
+            guard responseEpochAtStart == responseEpoch else { return }
+
+            if !keepProcessingIndicatorDuringPlayback {
+                voiceState = .responding
+            }
+            while elevenLabsTTSClient.isPlaying {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                try Task.checkCancellation()
+                guard responseEpochAtStart == responseEpoch else { return }
+            }
+        } catch {
+            if Self.shouldSuppressResponseError(
+                error,
+                responseEpochAtStart: responseEpochAtStart,
+                currentEpoch: responseEpoch
+            ) {
+                print("🔊 TTS interrupted")
+                return
+            }
+            ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+            print("⚠️ ElevenLabs TTS error: \(error)")
+            speakCreditsErrorFallback()
+        }
+    }
+
+    /// True when an error should not trigger the credits fallback — user interrupted
+    /// or replaced the in-flight response, or the error is a cooperative cancellation.
+    private static func shouldSuppressResponseError(
+        _ error: Error?,
+        responseEpochAtStart: Int,
+        currentEpoch: Int
+    ) -> Bool {
+        if responseEpochAtStart != currentEpoch {
+            return true
+        }
+        if Task.isCancelled {
+            return true
+        }
+        if let error, isBenignCancellation(error) {
+            return true
+        }
+        return false
+    }
+
+    /// True when an error is expected from the user interrupting push-to-talk mid-response.
+    private static func isBenignCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+
+        var nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return true
+        }
+
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isBenignCancellation(underlyingError)
+        }
+
+        return false
+    }
+
+    /// In transient mode (default), waits for TTS and pointing to finish, then
+    /// fades out the overlay half a second after the buddy is done.
     private func scheduleTransientHideIfNeeded() {
         guard !isClickyCursorEnabled && isOverlayVisible else { return }
 
         transientHideTask?.cancel()
         transientHideTask = Task {
-            // Wait for TTS audio to finish playing
-            while elevenLabsTTSClient.isPlaying {
+            while self.isOverlayInteractionActive {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard !Task.isCancelled else { return }
             }
 
-            // Wait for pointing animation to finish (location is cleared
-            // when the buddy flies back to the cursor)
-            while detectedElementScreenLocation != nil {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard !Task.isCancelled else { return }
-            }
-
-            // Pause 1s after everything finishes, then fade out
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            // Brief pause after the interaction ends, then fade out
+            try? await Task.sleep(nanoseconds: 500_000_000)
             guard !Task.isCancelled else { return }
             overlayWindowManager.fadeOutAndHideOverlay()
             isOverlayVisible = false
         }
+    }
+
+    /// True while the overlay should stay up for an in-flight voice or pointing interaction.
+    private var isOverlayInteractionActive: Bool {
+        showOnboardingVideo
+            || showOnboardingPrompt
+            || isWalkthroughActive
+            || globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed
+            || voiceState != .idle
+            || currentResponseTask != nil
+            || elevenLabsTTSClient.isPlaying
+            || detectedElementScreenLocation != nil
+            || buddyDictationManager.isDictationInProgress
+            || buddyDictationManager.isFinalizingTranscript
+            || buddyDictationManager.isPreparingToRecord
     }
 
     /// Speaks a hardcoded error message using macOS system TTS when API
@@ -763,63 +1704,6 @@ final class CompanionManager: ObservableObject {
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
-    }
-
-    // MARK: - Point Tag Parsing
-
-    /// Result of parsing a [POINT:...] tag from Claude's response.
-    struct PointingParseResult {
-        /// The response text with the [POINT:...] tag removed — this is what gets spoken.
-        let spokenText: String
-        /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
-        let coordinate: CGPoint?
-        /// Short label describing the element (e.g. "run button"), or "none".
-        let elementLabel: String?
-        /// Which screen the coordinate refers to (1-based), or nil to default to cursor screen.
-        let screenNumber: Int?
-    }
-
-    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
-    /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
-    static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
-
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
-            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
-        }
-
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Check if it's [POINT:none]
-        guard match.numberOfRanges >= 3,
-              let xRange = Range(match.range(at: 1), in: responseText),
-              let yRange = Range(match.range(at: 2), in: responseText),
-              let x = Double(responseText[xRange]),
-              let y = Double(responseText[yRange]) else {
-            return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
-        }
-
-        var elementLabel: String? = nil
-        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: responseText) {
-            elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
-        }
-
-        var screenNumber: Int? = nil
-        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: responseText) {
-            screenNumber = Int(responseText[screenRange])
-        }
-
-        return PointingParseResult(
-            spokenText: spokenText,
-            coordinate: CGPoint(x: x, y: y),
-            elementLabel: elementLabel,
-            screenNumber: screenNumber
-        )
     }
 
     // MARK: - Onboarding Video
@@ -916,6 +1800,7 @@ final class CompanionManager: ObservableObject {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                         self.showOnboardingPrompt = false
                         self.onboardingPromptText = ""
+                        self.scheduleTransientHideIfNeeded()
                     }
                 }
                 return
@@ -947,77 +1832,33 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Onboarding Demo Interaction
 
-    private static let onboardingDemoSystemPrompt = """
-    you're clicky, a small blue cursor buddy living on the user's screen. you're showing off during onboarding — look at their screen and find ONE specific, concrete thing to point at. pick something with a clear name or identity: a specific app icon (say its name), a specific word or phrase of text you can read, a specific filename, a specific button label, a specific tab title, a specific image you can describe. do NOT point at vague things like "a window" or "some text" — be specific about exactly what you see.
-
-    make a short quirky 3-6 word observation about the specific thing you picked — something fun, playful, or curious that shows you actually read/recognized it. no emojis ever. NEVER quote or repeat text you see on screen — just react to it. keep it to 6 words max, no exceptions.
-
-    CRITICAL COORDINATE RULE: you MUST only pick elements near the CENTER of the screen. your x coordinate must be between 20%-80% of the image width. your y coordinate must be between 20%-80% of the image height. do NOT pick anything in the top 20%, bottom 20%, left 20%, or right 20% of the screen. no menu bar items, no dock icons, no sidebar items, no items near any edge. only things clearly in the middle area of the screen. if the only interesting things are near the edges, pick something boring in the center instead.
-
-    respond with ONLY your short comment followed by the coordinate tag. nothing else. all lowercase.
-
-    format: your comment [POINT:x,y:label]
-
-    the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. origin (0,0) is top-left. x increases rightward, y increases downward.
-    """
-
     /// Captures a screenshot and asks Claude to find something interesting to
     /// point at, then triggers the buddy's flight animation. Used during
     /// onboarding to demo the pointing feature while the intro video plays.
     func performOnboardingDemoInteraction() {
-        // Don't interrupt an active voice response
         guard voiceState == .idle || voiceState == .responding else { return }
 
         Task {
             do {
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-
-                // Only send the cursor screen so Claude can't pick something
-                // on a different monitor that we can't point at.
-                guard let cursorScreenCapture = screenCaptures.first(where: { $0.isCursorScreen }) else {
-                    print("🎯 Onboarding demo: no cursor screen found")
-                    return
-                }
-
-                let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
-                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.onboardingDemoSystemPrompt,
-                    userPrompt: "look around my screen and find something interesting to point at",
-                    onTextChunk: { _ in }
+                let cursorScreenCapture = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
+                let agentResult = try await turnService.runOnboardingDemoTurn(
+                    cursorScreenCapture: cursorScreenCapture,
+                    model: selectedModel,
+                    capabilityContext: makeCapabilityContext(screenCapture: cursorScreenCapture)
                 )
 
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-
-                guard let pointCoordinate = parseResult.coordinate else {
+                guard let pointTarget = agentResult.pointTarget else {
                     print("🎯 Onboarding demo: no element to point at")
                     return
                 }
 
-                let screenshotWidth = CGFloat(cursorScreenCapture.screenshotWidthInPixels)
-                let screenshotHeight = CGFloat(cursorScreenCapture.screenshotHeightInPixels)
-                let displayWidth = CGFloat(cursorScreenCapture.displayWidthInPoints)
-                let displayHeight = CGFloat(cursorScreenCapture.displayHeightInPoints)
-                let displayFrame = cursorScreenCapture.displayFrame
-
-                let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-                let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-                let appKitY = displayHeight - displayLocalY
-                let globalLocation = CGPoint(
-                    x: displayLocalX + displayFrame.origin.x,
-                    y: appKitY + displayFrame.origin.y
+                let renderedPoint = CompanionPointRenderer.render(
+                    pointTarget: pointTarget,
+                    on: cursorScreenCapture
                 )
 
-                // Set custom bubble text so the pointing animation uses Claude's
-                // comment instead of a random phrase
-                detectedElementBubbleText = parseResult.spokenText
-                detectedElementScreenLocation = globalLocation
-                detectedElementDisplayFrame = displayFrame
-                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
+                publishElementPoint(renderedPoint, bubbleText: agentResult.spokenText)
+                print("🎯 Onboarding demo: pointing at \"\(renderedPoint.label)\" — \"\(agentResult.spokenText)\"")
             } catch {
                 print("⚠️ Onboarding demo error: \(error)")
             }

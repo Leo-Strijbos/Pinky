@@ -9,7 +9,6 @@
 
 import ServiceManagement
 import SwiftUI
-import Sparkle
 
 @main
 struct leanring_buddyApp: App {
@@ -30,8 +29,10 @@ struct leanring_buddyApp: App {
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
+    private var resultWindowManager: ClickyResultWindowManager?
+    private var documentWindowManager: ClickyDocumentWindowManager?
+    private var copyableContentWindowManager: ClickyCopyableContentWindowManager?
     private let companionManager = CompanionManager()
-    private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🎯 Clicky: Starting...")
@@ -43,14 +44,22 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         ClickyAnalytics.trackAppOpened()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
+        resultWindowManager = ClickyResultWindowManager()
+        let documentWindowManager = ClickyDocumentWindowManager()
+        let copyableContentWindowManager = ClickyCopyableContentWindowManager()
+        companionManager.resultWindowManager = resultWindowManager
+        companionManager.documentWindowManager = documentWindowManager
+        companionManager.copyableContentWindowManager = copyableContentWindowManager
+        self.documentWindowManager = documentWindowManager
+        self.copyableContentWindowManager = copyableContentWindowManager
         companionManager.start()
+        menuBarPanelManager?.startNotchSurface()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
             menuBarPanelManager?.showPanelOnLaunch()
         }
         registerAsLoginItemIfNeeded()
-        // startSparkleUpdater()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -69,21 +78,6 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 print("⚠️ Clicky: Failed to register as login item: \(error)")
             }
-        }
-    }
-
-    private func startSparkleUpdater() {
-        let updaterController = SPUStandardUpdaterController(
-            startingUpdater: false,
-            updaterDelegate: nil,
-            userDriverDelegate: nil
-        )
-        self.sparkleUpdaterController = updaterController
-
-        do {
-            try updaterController.updater.start()
-        } catch {
-            print("⚠️ Clicky: Sparkle updater failed to start: \(error)")
         }
     }
 }

@@ -10,6 +10,7 @@
 import AppKit
 import AVFoundation
 import Combine
+import CoreAudio
 import Foundation
 import Speech
 
@@ -263,7 +264,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     private let transcriptionProvider: any BuddyTranscriptionProvider
-    private let audioEngine = AVAudioEngine()
+    /// Created fresh for each push-to-talk session and released when done.
+    /// Keeping a long-lived AVAudioEngine caused stale Core Audio device
+    /// listeners (device ID 136 / -10877) when AirPods connect while idle.
+    private var recordingAudioEngine: AVAudioEngine?
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?
     private var activeStartSource: BuddyDictationStartSource?
     private var draftCallbacks: BuddyDictationDraftCallbacks?
@@ -279,12 +283,107 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     /// Timestamp of the last completed permission request, used to debounce
     /// rapid follow-up requests that arrive before macOS updates its cache.
     private var lastPermissionRequestCompletedAt: Date?
+    /// True while the transcription websocket is still connecting. Mic capture
+    /// starts immediately so the user can speak right away; audio is buffered
+    /// here until the provider session is ready.
+    private var isWaitingForTranscriptionSession = false
+    private var pendingAudioBuffersWhileConnecting: [AVAudioPCMBuffer] = []
+    private var capturedAudioBufferCount = 0
+    private static let maxPendingAudioBuffersWhileConnecting = 200
+    private var hasRegisteredDefaultInputDeviceListener = false
+    /// The node that currently hosts the microphone tap (input or mixer).
+    private var microphoneTapHostNode: AVAudioNode?
+
+    private static let defaultInputDeviceChangedListener: AudioObjectPropertyListenerProc = { _, _, _, clientData in
+        guard let clientData else { return noErr }
+        let manager = Unmanaged<BuddyDictationManager>.fromOpaque(clientData).takeUnretainedValue()
+        Task { @MainActor in
+            manager.handleDefaultInputDeviceChanged()
+        }
+        return noErr
+    }
 
     override init() {
         let transcriptionProvider = BuddyTranscriptionProviderFactory.makeDefaultProvider()
         self.transcriptionProvider = transcriptionProvider
         self.transcriptionProviderDisplayName = transcriptionProvider.displayName
         super.init()
+        registerDefaultInputDeviceChangeListenerIfNeeded()
+    }
+
+    /// Releases Core Audio listeners and the recording engine. Called on app quit
+    /// because deinit is nonisolated and cannot invoke @MainActor cleanup.
+    func shutdown() {
+        unregisterDefaultInputDeviceChangeListener()
+        tearDownRecordingAudioEngine()
+    }
+
+    private func registerDefaultInputDeviceChangeListenerIfNeeded() {
+        guard !hasRegisteredDefaultInputDeviceListener else { return }
+        hasRegisteredDefaultInputDeviceListener = true
+
+        var defaultInputDevicePropertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+        AudioObjectAddPropertyListener(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultInputDevicePropertyAddress,
+            Self.defaultInputDeviceChangedListener,
+            selfPointer
+        )
+    }
+
+    private func unregisterDefaultInputDeviceChangeListener() {
+        guard hasRegisteredDefaultInputDeviceListener else { return }
+
+        var defaultInputDevicePropertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+        AudioObjectRemovePropertyListener(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultInputDevicePropertyAddress,
+            Self.defaultInputDeviceChangedListener,
+            selfPointer
+        )
+        hasRegisteredDefaultInputDeviceListener = false
+    }
+
+    private func handleDefaultInputDeviceChanged() {
+        // Starting the mic triggers an HFP profile switch on AirPods, which
+        // fires this listener — tearing down mid-session would kill capture.
+        if isDictationInProgress || isPreparingToRecord {
+            print("🎙️ Default input device changed during dictation — keeping active engine")
+            return
+        }
+
+        print("🎙️ Default input device changed — releasing idle audio engine")
+        tearDownRecordingAudioEngine()
+    }
+
+    private func tearDownRecordingAudioEngine() {
+        guard let recordingAudioEngine else { return }
+
+        if recordingAudioEngine.isRunning {
+            recordingAudioEngine.stop()
+        }
+
+        if let microphoneTapHostNode {
+            microphoneTapHostNode.removeTap(onBus: 0)
+            self.microphoneTapHostNode = nil
+        } else {
+            recordingAudioEngine.inputNode.removeTap(onBus: 0)
+        }
+
+        recordingAudioEngine.reset()
+        self.recordingAudioEngine = nil
     }
 
     func updateContextualKeyterms(_ contextualKeyterms: [String]) {
@@ -342,8 +441,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             draftCallbacks?.updateDraftText(currentDraftText)
         }
 
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        isWaitingForTranscriptionSession = false
+        pendingAudioBuffersWhileConnecting = []
+        tearDownRecordingAudioEngine()
         activeTranscriptionSession?.cancel()
 
         resetSessionState()
@@ -440,6 +540,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         )
         microphoneButtonRecordingStartedAt = nil
         lastRecordedAudioPowerSampleDate = .distantPast
+        isWaitingForTranscriptionSession = false
+        pendingAudioBuffersWhileConnecting = []
+        capturedAudioBufferCount = 0
 
         guard !Task.isCancelled else {
             print("🎙️ BuddyDictationManager: start cancelled (shortcut released before recording began)")
@@ -451,8 +554,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             try await startRecognitionSession()
             guard !Task.isCancelled else {
                 print("🎙️ BuddyDictationManager: start cancelled (shortcut released during session start)")
-                audioEngine.stop()
-                audioEngine.inputNode.removeTap(onBus: 0)
+                tearDownRecordingAudioEngine()
                 activeTranscriptionSession?.cancel()
                 resetSessionState()
                 return
@@ -464,6 +566,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             print("🎙️ BuddyDictationManager: recognition session started")
         } catch {
             isPreparingToRecord = false
+            tearDownRecordingAudioEngine()
             lastErrorMessage = userFacingErrorMessage(
                 from: error,
                 fallback: "couldn't start voice input. try again."
@@ -491,8 +594,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let finalTranscriptFallbackDelaySeconds = activeTranscriptionSession?.finalTranscriptFallbackDelaySeconds
             ?? Self.defaultFinalTranscriptFallbackDelaySeconds
 
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        tearDownRecordingAudioEngine()
         activeTranscriptionSession?.requestFinalTranscript()
 
         finalizeFallbackWorkItem?.cancel()
@@ -514,6 +616,13 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private func startRecognitionSession() async throws {
         activeTranscriptionSession?.cancel()
         activeTranscriptionSession = nil
+        pendingAudioBuffersWhileConnecting = []
+        isWaitingForTranscriptionSession = true
+
+        // Start mic capture immediately so push-to-talk feels responsive.
+        // Audio is buffered locally while the AssemblyAI websocket connects.
+        print("🎙️ BuddyDictationManager: starting audio engine")
+        try await startAudioEngineCapture()
 
         print("🎙️ BuddyDictationManager: opening transcription provider \(transcriptionProvider.displayName)")
 
@@ -543,20 +652,136 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             }
         )
 
-        self.activeTranscriptionSession = activeTranscriptionSession
-        print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
-
-        let inputNode = audioEngine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.activeTranscriptionSession?.appendAudioBuffer(buffer)
-            self?.updateAudioPowerLevel(from: buffer)
+        guard !Task.isCancelled else {
+            isWaitingForTranscriptionSession = false
+            pendingAudioBuffersWhileConnecting = []
+            activeTranscriptionSession.cancel()
+            tearDownRecordingAudioEngine()
+            return
         }
 
+        isWaitingForTranscriptionSession = false
+        self.activeTranscriptionSession = activeTranscriptionSession
+
+        let bufferedAudioChunkCount = pendingAudioBuffersWhileConnecting.count
+        for bufferedAudioBuffer in pendingAudioBuffersWhileConnecting {
+            activeTranscriptionSession.appendAudioBuffer(bufferedAudioBuffer)
+        }
+        pendingAudioBuffersWhileConnecting = []
+
+        if bufferedAudioChunkCount > 0 {
+            print("🎙️ BuddyDictationManager: flushed \(bufferedAudioChunkCount) buffered audio chunks to \(transcriptionProvider.displayName)")
+        }
+
+        print("🎙️ BuddyDictationManager: provider ready (\(transcriptionProvider.displayName))")
+
+        // The user may have released the hotkey while the websocket was still opening.
+        if isFinalizingTranscript {
+            activeTranscriptionSession.requestFinalTranscript()
+        }
+    }
+
+    private func startAudioEngineCapture() async throws {
+        tearDownRecordingAudioEngine()
+
+        if BuddyMicrophoneCaptureUtilities.isDefaultInputDeviceBluetooth() {
+            try await startBluetoothMicrophoneCapture()
+        } else {
+            try await startBuiltInMicrophoneCapture()
+        }
+    }
+
+    private func startBuiltInMicrophoneCapture() async throws {
+        let audioEngine = AVAudioEngine()
+        recordingAudioEngine = audioEngine
+
+        let inputNode = audioEngine.inputNode
         audioEngine.prepare()
+        installMicrophoneTap(on: inputNode)
+
         try audioEngine.start()
+
+        let committedInputFormat = inputNode.outputFormat(forBus: 0)
+        let inputDeviceDescription = BuddyMicrophoneCaptureUtilities.defaultInputDeviceDescription()
+        print(
+            "🎙️ BuddyDictationManager: audio engine running — \(inputDeviceDescription), "
+                + "\(committedInputFormat.sampleRate)Hz, \(committedInputFormat.channelCount) channel(s)"
+        )
+    }
+
+    private func startBluetoothMicrophoneCapture() async throws {
+        await BuddyMicrophoneCaptureUtilities.activateBluetoothHFPCaptureProfile()
+
+        guard let hardwareCaptureFormat = BuddyMicrophoneCaptureUtilities.defaultInputHardwareAVAudioFormat() else {
+            throw NSError(
+                domain: "BuddyDictationManager",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Could not read the Bluetooth microphone format."]
+            )
+        }
+
+        print(
+            "🎙️ Bluetooth hardware capture format: "
+                + "\(hardwareCaptureFormat.sampleRate)Hz, \(hardwareCaptureFormat.channelCount) channel(s)"
+        )
+
+        let audioEngine = AVAudioEngine()
+        recordingAudioEngine = audioEngine
+
+        let inputNode = audioEngine.inputNode
+        let mixerNode = audioEngine.mainMixerNode
+
+        // Connect using the HFP hardware rate (typically 16–24 kHz). Do not
+        // connect the mixer to the output node — that pulls in the 48 kHz A2DP
+        // playback path and the tap receives no usable audio (-10877 / 0 buffers).
+        audioEngine.connect(inputNode, to: mixerNode, format: hardwareCaptureFormat)
+        mixerNode.outputVolume = 0
+
+        audioEngine.prepare()
+        BuddyMicrophoneCaptureUtilities.tryAssignDefaultInputDevice(to: inputNode)
+        installMicrophoneTap(on: mixerNode)
+
+        try audioEngine.start()
+
+        let tapFormat = mixerNode.outputFormat(forBus: 0)
+        let inputDeviceDescription = BuddyMicrophoneCaptureUtilities.defaultInputDeviceDescription()
+        print(
+            "🎙️ BuddyDictationManager: audio engine running — \(inputDeviceDescription), "
+                + "tap \(tapFormat.sampleRate)Hz, \(tapFormat.channelCount) channel(s)"
+        )
+    }
+
+    private func installMicrophoneTap(on tapHostNode: AVAudioNode) {
+        microphoneTapHostNode = tapHostNode
+
+        tapHostNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] audioBuffer, _ in
+            guard let self else { return }
+
+            // Copy on the realtime audio thread, then hand off to the main actor.
+            guard let copiedAudioBuffer = BuddyMicrophoneCaptureUtilities.copyPCMBuffer(audioBuffer) else {
+                return
+            }
+
+            Task { @MainActor in
+                self.routeCapturedAudioBuffer(copiedAudioBuffer)
+            }
+        }
+    }
+
+    private func routeCapturedAudioBuffer(_ audioBuffer: AVAudioPCMBuffer) {
+        capturedAudioBufferCount += 1
+        updateAudioPowerLevel(from: audioBuffer)
+
+        if let activeTranscriptionSession {
+            activeTranscriptionSession.appendAudioBuffer(audioBuffer)
+            return
+        }
+
+        guard isWaitingForTranscriptionSession else { return }
+        guard pendingAudioBuffersWhileConnecting.count < Self.maxPendingAudioBuffersWhileConnecting else { return }
+        guard let copiedAudioBuffer = BuddyMicrophoneCaptureUtilities.copyPCMBuffer(audioBuffer) else { return }
+
+        pendingAudioBuffersWhileConnecting.append(copiedAudioBuffer)
     }
 
     private func handleRecognitionError(_ error: Error) {
@@ -588,19 +813,22 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let finalDraftText = composeDraftText(withTranscribedText: latestRecognizedText)
         let finalTranscriptText = latestRecognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
         let currentDraftCallbacks = draftCallbacks
+        let capturedBufferCountForLogging = capturedAudioBufferCount
 
         if !shouldSubmitFinalDraft && !finalDraftText.isEmpty {
             currentDraftCallbacks?.updateDraftText(finalDraftText)
         }
 
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        tearDownRecordingAudioEngine()
         activeTranscriptionSession?.cancel()
 
         resetSessionState()
 
         guard shouldSubmitFinalDraft else { return }
-        guard !finalTranscriptText.isEmpty else { return }
+        guard !finalTranscriptText.isEmpty else {
+            print("🎙️ BuddyDictationManager: no transcript produced (\(capturedBufferCountForLogging) audio buffers captured) — skipping AI request")
+            return
+        }
 
         currentDraftCallbacks?.submitDraftText(finalDraftText)
     }
@@ -647,6 +875,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         )
         microphoneButtonRecordingStartedAt = nil
         lastRecordedAudioPowerSampleDate = .distantPast
+        isWaitingForTranscriptionSession = false
+        pendingAudioBuffersWhileConnecting = []
+        capturedAudioBufferCount = 0
     }
 
     private func buildTranscriptionKeyterms() -> [String] {
@@ -685,19 +916,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     private func updateAudioPowerLevel(from audioBuffer: AVAudioPCMBuffer) {
-        guard let channelData = audioBuffer.floatChannelData else { return }
-
-        let channelSamples = channelData[0]
-        let frameCount = Int(audioBuffer.frameLength)
-        guard frameCount > 0 else { return }
-
-        var summedSquares: Float = 0
-        for sampleIndex in 0..<frameCount {
-            let sample = channelSamples[sampleIndex]
-            summedSquares += sample * sample
+        guard let rootMeanSquare = BuddyMicrophoneCaptureUtilities.rootMeanSquareLevel(from: audioBuffer) else {
+            return
         }
 
-        let rootMeanSquare = sqrt(summedSquares / Float(frameCount))
         let boostedLevel = min(max(rootMeanSquare * 10.2, 0), 1)
 
         DispatchQueue.main.async { [weak self] in

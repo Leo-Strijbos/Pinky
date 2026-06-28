@@ -29,8 +29,10 @@ final class ElevenLabsTTSClient {
     }
 
     /// Sends `text` to ElevenLabs TTS and plays the resulting audio.
+    /// Returns the audio duration in seconds once playback has started.
     /// Throws on network or decoding errors. Cancellation-safe.
-    func speakText(_ text: String) async throws {
+    @discardableResult
+    func speakText(_ text: String) async throws -> TimeInterval {
         var request = URLRequest(url: proxyURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -66,6 +68,7 @@ final class ElevenLabsTTSClient {
         self.audioPlayer = player
         player.play()
         print("🔊 ElevenLabs TTS: playing \(data.count / 1024)KB audio")
+        return player.duration
     }
 
     /// Whether TTS audio is currently playing back.
