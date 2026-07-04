@@ -9,7 +9,7 @@ import Foundation
 
 struct CompanionSessionPlanningCapture {
     let screenCapture: CompanionScreenCapture
-    let screenContext: PlaybookScreenContext
+    let screenContext: ScreenContext
 
     var labeledImage: (data: Data, label: String) {
         let dimensionInfo =
@@ -26,11 +26,11 @@ enum CompanionSessionPlanningContext {
     static func capture() async throws -> CompanionSessionPlanningCapture {
         CompanionSessionPlanningCapture(
             screenCapture: try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG(),
-            screenContext: PlaybookScreenContextCapture.captureCurrentContext()
+            screenContext: ScreenContextCapture.captureCurrentContext()
         )
     }
 
-    static func screenContextAppendix(for context: PlaybookScreenContext) -> String {
+    static func screenContextAppendix(for context: ScreenContext) -> String {
         var lines = [
             "local screen context (metadata only — may or may not relate to the user's request):",
             "platform: macOS",

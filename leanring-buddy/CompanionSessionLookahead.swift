@@ -38,12 +38,12 @@ enum CompanionSessionLookahead {
         case .visionCheck:
             return false
 
-        case .playbookStep(let stepID):
-            guard let target = session.plan.playbookSteps?.first(where: { $0.id == stepID }) else {
+        case .skillStep(let stepID):
+            guard let target = session.plan.skillSteps?.first(where: { $0.id == stepID }) else {
                 return false
             }
-            let context = PlaybookScreenContextCapture.captureCurrentContext()
-            return PlaybookContextMatcher.matchScore(for: target, context: context) >= 0.42
+            let context = ScreenContextCapture.captureCurrentContext()
+            return ScreenContextMatcher.matchScore(for: target, context: context) >= 0.42
         }
     }
 

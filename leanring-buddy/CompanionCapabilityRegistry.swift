@@ -109,7 +109,7 @@ final class CompanionCapabilityRegistry {
     }
 
     func executeAppAction(
-        _ action: ClickyAppAction,
+        _ action: PinkyAppAction,
         context: CompanionCapabilityContext
     ) async -> String {
         switch action {
@@ -133,7 +133,7 @@ final class CompanionCapabilityRegistry {
             return result.toolResultContent
 
         case .spotifySearchAndPlay, .spotifyPlaybackControl:
-            return await ClickyAppActionHandlerRegistry.executeLegacy(action)
+            return await PinkyAppActionHandlerRegistry.executeLegacy(action)
         }
     }
 }

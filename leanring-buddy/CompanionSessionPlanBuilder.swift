@@ -2,7 +2,7 @@
 //  CompanionSessionPlanBuilder.swift
 //  leanring-buddy
 //
-//  Builds session plans from stored playbooks and local compound commands.
+//  Builds session plans from stored skills and local compound commands.
 //
 
 import Foundation
@@ -10,29 +10,29 @@ import Foundation
 enum CompanionSessionPlanBuilder {
 
     static func compoundSteps(from transcript: String) -> [CompanionSessionStep]? {
-        ClickyVoiceCompoundCommandParser.parse(transcript: transcript)
+        PinkyVoiceCompoundCommandParser.parse(transcript: transcript)
     }
 
     static func storedProcedurePlan(
         transcript: String,
-        playbookManager: PlaybookManager
+        skillManager: SkillManager
     ) -> CompanionSessionPlan? {
-        guard ClickyProcedureQuery.isStepByStepIntent(transcript),
-              let retrieval = playbookManager.retrieveProcedure(for: transcript) else {
+        guard PinkyProcedureQuery.isStepByStepIntent(transcript),
+              let retrieval = skillManager.retrieveProcedure(for: transcript) else {
             return nil
         }
 
         guard !retrieval.steps.isEmpty else { return nil }
-        return PlaybookSessionAdapter.sessionPlan(from: retrieval)
+        return SkillSessionAdapter.sessionPlan(from: retrieval)
     }
 
-    static func plan(forPlaybookID playbookID: String, playbookManager: PlaybookManager) -> CompanionSessionPlan? {
-        guard let playbook = playbookManager.playbook(withID: playbookID) else { return nil }
-        let steps = playbookManager.steps(forPlaybookID: playbookID)
+    static func plan(forSkillName skillName: String, skillManager: SkillManager) -> CompanionSessionPlan? {
+        guard let skill = skillManager.skill(named: skillName) else { return nil }
+        let steps = skillManager.playbackSteps(forSkillName: skillName)
         guard !steps.isEmpty else { return nil }
 
-        let retrieval = PlaybookRetrieval(playbook: playbook, steps: steps, relevanceScore: 1.0)
-        return PlaybookSessionAdapter.sessionPlan(from: retrieval)
+        let retrieval = SkillRetrieval(skill: skill, steps: steps, relevanceScore: 1.0)
+        return SkillSessionAdapter.sessionPlan(from: retrieval)
     }
 
     static func agentGeneratedPlan(

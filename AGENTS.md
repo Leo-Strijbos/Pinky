@@ -1,4 +1,4 @@
-# Clicky - Agent Instructions
+# Pinky - Agent Instructions
 
 <!-- This is the single source of truth for all AI coding agents. CLAUDE.md is a symlink to this file. -->
 <!-- AGENTS.md spec: https://github.com/agentsmd/agents.md — supported by Claude Code, Cursor, Copilot, Gemini CLI, and others. -->
@@ -21,7 +21,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
 - **Concurrency**: `@MainActor` isolation, async/await throughout
-- **Analytics**: PostHog via `ClickyAnalytics.swift`
+- **Analytics**: PostHog via `PinkyAnalytics.swift`
 
 ### API Proxy (Cloudflare Worker)
 
@@ -40,11 +40,11 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 **Menu Bar Panel Pattern**: The companion panel uses `NSStatusItem` for the menu bar icon and a custom borderless `NSPanel` for the floating control panel. This gives full control over appearance (dark, rounded corners, custom shadow) and avoids the standard macOS menu/popover chrome. The panel is non-activating so it doesn't steal focus. A global event monitor auto-dismisses it on outside clicks.
 
-**Notch Surface Pattern**: On MacBooks with a physical notch, Clicky uses DynamicNotchKit for a compact presence in the notch (triangle icon + voice status). Hovering the notch region drops down the existing `CompanionPanelView` panel centered beneath the cutout. On Macs without a notch, a minimal top-center pill provides the same hover target. The traditional menu bar status item is hidden when a built-in notch display is present.
+**Notch Surface Pattern**: On MacBooks with a physical notch, Pinky uses DynamicNotchKit for a compact presence in the notch (triangle icon + voice status). Hovering the notch region drops down the existing `CompanionPanelView` panel centered beneath the cutout. On Macs without a notch, a minimal top-center pill provides the same hover target. The traditional menu bar status item is hidden when a built-in notch display is present.
 
-**Web Result Panels**: For stock and local-discovery queries, Claude adds a hidden `[PANEL:stock:TICKER]` or `[PANEL:places:search query]` line to web-search replies. Clicky strips the tag before speaking or displaying text, then opens a white floating panel with an embedded `WKWebView` (Yahoo Finance chart or Google Maps) as the answer begins.
+**Web Result Panels**: For stock and local-discovery queries, Claude adds a hidden `[PANEL:stock:TICKER]` or `[PANEL:places:search query]` line to web-search replies. Pinky strips the tag before speaking or displaying text, then opens a white floating panel with an embedded `WKWebView` (Yahoo Finance chart or Google Maps) as the answer begins.
 
-**Knowledge Base (RAG)**: Users upload PDFs from the notch/menu panel. Clicky indexes them locally with SQLite FTS5, injects matching excerpts into prompts, and opens source PDFs in a floating `PDFView` panel (jumping to the best matching page) when retrieval hits or the user asks to open a document.
+**Knowledge Base (RAG)**: Users upload PDFs from the notch/menu panel. Pinky indexes them locally with SQLite FTS5, injects matching excerpts into prompts, and opens source PDFs in a floating `PDFView` panel (jumping to the best matching page) when retrieval hits or the user asks to open a document.
 
 **Cursor Overlay**: A full-screen transparent `NSPanel` hosts the blue cursor companion. It's non-activating, joins all Spaces, and never steals focus. The cursor position, response text, waveform, and pointing animations all render in this overlay via SwiftUI through `NSHostingView`.
 
@@ -52,7 +52,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 **Shared URLSession for AssemblyAI**: A single long-lived `URLSession` is shared across all AssemblyAI streaming sessions (owned by the provider, not the session). Creating and invalidating a URLSession per session corrupts the OS connection pool and causes "Socket is not connected" errors after a few rapid reconnections.
 
-**Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
+**Transient Cursor Mode**: When "Show Pinky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
 ## Key Files
 
@@ -61,9 +61,9 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
 | `CompanionManager.swift` | ~1100 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Voice: intro-only → Haiku text; else vision + web search → TTS + pointing + optional result panel. |
 | `MenuBarPanelManager.swift` | ~450 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), notch hover probe, and click-outside-to-dismiss monitor. |
-| `ClickyDynamicNotchBridge.swift` | ~170 | Minimal DynamicNotchKit bridge for compact notch chrome (Clicky triangle + voice status). |
-| `ClickyNotchScreenSupport.swift` | ~100 | Notch detection, hover regions, and dropdown panel positioning helpers. |
-| `ClickyNotchFallbackPillView.swift` | ~60 | Top-center hover pill for Macs without a physical notch. |
+| `PinkyDynamicNotchBridge.swift` | ~170 | Minimal DynamicNotchKit bridge for compact notch chrome (Pinky triangle + voice status). |
+| `PinkyNotchScreenSupport.swift` | ~100 | Notch detection, hover regions, and dropdown panel positioning helpers. |
+| `PinkyNotchFallbackPillView.swift` | ~60 | Top-center hover pill for Macs without a physical notch. |
 | `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
@@ -76,29 +76,29 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~650 | Claude API client: streaming text/vision, `sendTextWithWebSearch`, `sendVisionWithWebSearch` (voice PTT). |
-| `CompanionRequestRouter.swift` | ~90 | Intro-only voice utterance detector (skips screenshot for "thanks", "hey clicky", etc.). |
-| `ClickyChatModels.swift` | ~70 | Shared chat message/session models and web source citations. |
-| `ClickyChatSessionStore.swift` | ~80 | In-memory chat session store for glass chat windows. |
-| `ClickyChatResponseService.swift` | ~80 | Chat pipeline: always web search, no router. |
+| `CompanionRequestRouter.swift` | ~90 | Intro-only voice utterance detector (skips screenshot for "thanks", "hey pinky", etc.). |
+| `PinkyChatModels.swift` | ~70 | Shared chat message/session models and web source citations. |
+| `PinkyChatSessionStore.swift` | ~80 | In-memory chat session store for glass chat windows. |
+| `PinkyChatResponseService.swift` | ~80 | Chat pipeline: always web search, no router. |
 | `ChatWindowManager.swift` | ~90 | Glass chat window lifecycle. |
 | `ChatWindowView.swift` | ~220 | ChatGPT-style chat UI with composer and source links. |
-| `ClickyWebResultIntent.swift` | ~120 | Parses Claude's hidden `[PANEL:…]` tags and builds Yahoo Finance / Google Maps URLs. |
-| `ClickyWebView.swift` | ~35 | `WKWebView` wrapper for result panels. |
-| `ClickyResultPanelView.swift` | ~80 | White panel UI for embedded web results (header, close, open in browser). |
-| `ClickyResultWindowManager.swift` | ~110 | Floating result panel lifecycle. Opened automatically from voice or chat when intent matches. |
-| `ClickyKnowledgeModels.swift` | ~90 | Knowledge document/chunk/retrieval models and Application Support paths. |
-| `ClickyKnowledgeStore.swift` | ~320 | SQLite + FTS5 index for uploaded documents. |
-| `ClickyPDFIndexer.swift` | ~120 | PDFKit text extraction and chunking on import. |
-| `ClickyKnowledgeRetriever.swift` | ~90 | FTS retrieval and direct "open SOP" alias matching. |
-| `ClickyKnowledgeManager.swift` | ~130 | Import UI coordination, search, catalog persistence. |
-| `ClickyPDFView.swift` | ~45 | PDFKit wrapper for document panels. |
-| `ClickyDocumentPanelView.swift` | ~130 | White SOP viewer with multi-document tabs. |
-| `ClickyDocumentWindowManager.swift` | ~110 | Floating PDF panel lifecycle. |
+| `PinkyWebResultIntent.swift` | ~120 | Parses Claude's hidden `[PANEL:…]` tags and builds Yahoo Finance / Google Maps URLs. |
+| `PinkyWebView.swift` | ~35 | `WKWebView` wrapper for result panels. |
+| `PinkyResultPanelView.swift` | ~80 | White panel UI for embedded web results (header, close, open in browser). |
+| `PinkyResultWindowManager.swift` | ~110 | Floating result panel lifecycle. Opened automatically from voice or chat when intent matches. |
+| `PinkyKnowledgeModels.swift` | ~90 | Knowledge document/chunk/retrieval models and Application Support paths. |
+| `PinkyKnowledgeStore.swift` | ~320 | SQLite + FTS5 index for uploaded documents. |
+| `PinkyPDFIndexer.swift` | ~120 | PDFKit text extraction and chunking on import. |
+| `PinkyKnowledgeRetriever.swift` | ~90 | FTS retrieval and direct "open SOP" alias matching. |
+| `PinkyKnowledgeManager.swift` | ~130 | Import UI coordination, search, catalog persistence. |
+| `PinkyPDFView.swift` | ~45 | PDFKit wrapper for document panels. |
+| `PinkyDocumentPanelView.swift` | ~130 | White SOP viewer with multi-document tabs. |
+| `PinkyDocumentWindowManager.swift` | ~110 | Floating PDF panel lifecycle. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
-| `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
+| `PinkyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |

@@ -24,7 +24,7 @@ final class CompanionSessionManager {
 
     func process(
         transcript: String,
-        workflowManager: PlaybookManager,
+        workflowManager: SkillManager,
         completionMonitor: CompanionSessionCompletionMonitor,
         routingContext: CompanionWalkthroughRoutingContext = .empty
     ) async -> CompanionSessionOutcome? {
@@ -60,7 +60,7 @@ final class CompanionSessionManager {
             return .runCompoundSteps(compoundSteps)
         }
 
-        guard ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        guard PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: transcript,
             context: routingContext
         ) else {
@@ -69,7 +69,7 @@ final class CompanionSessionManager {
 
         if let storedPlan = CompanionSessionPlanBuilder.storedProcedurePlan(
             transcript: transcript,
-            playbookManager: workflowManager
+            skillManager: workflowManager
         ) {
             return activatePlan(storedPlan)
         }
@@ -113,7 +113,7 @@ final class CompanionSessionManager {
     }
 
     func checkForAutoAdvance(
-        workflowManager: PlaybookManager,
+        workflowManager: SkillManager,
         completionMonitor: CompanionSessionCompletionMonitor,
         context: CompanionCompletionCheckContext
     ) async -> (session: CompanionActiveSession, result: CompanionStepCompletionResult)? {
@@ -149,7 +149,7 @@ final class CompanionSessionManager {
     }
 
     func tryAutoAdvance(
-        workflowManager: PlaybookManager,
+        workflowManager: SkillManager,
         completionMonitor: CompanionSessionCompletionMonitor,
         context: CompanionCompletionCheckContext
     ) async -> CompanionSessionOutcome? {
@@ -197,12 +197,12 @@ final class CompanionSessionManager {
         transcript: String,
         session: CompanionActiveSession
     ) -> CompanionSessionOutcome? {
-        if ClickyVoiceSessionPhrases.isCancel(transcript) {
+        if PinkyVoiceSessionPhrases.isCancel(transcript) {
             return endWalkthrough(reason: .cancel)
         }
 
-        if ClickyVoiceSessionPhrases.isUserDone(transcript) {
-            let remainder = ClickyVoiceSessionPhrases.commandAfterWalkthroughExit(in: transcript)
+        if PinkyVoiceSessionPhrases.isUserDone(transcript) {
+            let remainder = PinkyVoiceSessionPhrases.commandAfterWalkthroughExit(in: transcript)
             if remainder != transcript, remainder.count >= 4 {
                 activeSession = nil
                 return .exitAndContinue(transcript: remainder)
@@ -210,8 +210,8 @@ final class CompanionSessionManager {
             return endWalkthrough(reason: .userDone)
         }
 
-        if ClickyVoiceSessionPhrases.isSkipRemaining(transcript) {
-            let remainder = ClickyVoiceSessionPhrases.commandAfterWalkthroughExit(in: transcript)
+        if PinkyVoiceSessionPhrases.isSkipRemaining(transcript) {
+            let remainder = PinkyVoiceSessionPhrases.commandAfterWalkthroughExit(in: transcript)
             if remainder != transcript, remainder.count >= 4 {
                 activeSession = nil
                 return .exitAndContinue(transcript: remainder)
@@ -219,7 +219,7 @@ final class CompanionSessionManager {
             return endWalkthrough(reason: .skipRemaining)
         }
 
-        if ClickyVoiceSessionPhrases.isRestart(transcript) {
+        if PinkyVoiceSessionPhrases.isRestart(transcript) {
             var restarted = session
             restarted.currentIndex = 0
             restarted.awaitingAdvance = false
@@ -234,21 +234,21 @@ final class CompanionSessionManager {
             return presentCurrentStep(prefix: "starting over.")
         }
 
-        guard ClickyVoiceSessionContinuity.continuesWalkthrough(transcript, session: session) else {
+        guard PinkyVoiceSessionContinuity.continuesWalkthrough(transcript, session: session) else {
             activeSession = nil
             print("🎬 Session: ending walkthrough — new request")
             return .exitAndContinue(transcript: transcript)
         }
 
-        if ClickyVoiceSessionPhrases.isAdvance(transcript)
-            || ClickyVoiceSessionContinuity.isStepAcknowledgment(transcript, session: session) {
+        if PinkyVoiceSessionPhrases.isAdvance(transcript)
+            || PinkyVoiceSessionContinuity.isStepAcknowledgment(transcript, session: session) {
             if let outcome = attemptMoveToNextStep(from: session, wasAutomatic: false, transition: nil) {
                 return outcome
             }
             return .agentTurn(transcript: transcript, session: session)
         }
 
-        if session.awaitingAdvance, ClickyVoiceSessionPhrases.isLikelyStepQuestion(transcript) {
+        if session.awaitingAdvance, PinkyVoiceSessionPhrases.isLikelyStepQuestion(transcript) {
             return .agentTurn(transcript: transcript, session: session)
         }
 
@@ -344,7 +344,7 @@ final class CompanionSessionManager {
 
     private func prepareForCurrentStep(_ session: CompanionActiveSession) -> CompanionActiveSession {
         var updated = session
-        updated.stepContextSnapshot = PlaybookScreenContextCapture.captureCurrentContext()
+        updated.stepContextSnapshot = ScreenContextCapture.captureCurrentContext()
         updated.awaitingAdvance = false
         updated.stepReadyAt = nil
         updated.showSubsteps = false
@@ -357,7 +357,7 @@ final class CompanionSessionManager {
         var updated = session
         updated.awaitingAdvance = true
         updated.stepReadyAt = Date()
-        updated.stepContextSnapshot = PlaybookScreenContextCapture.captureCurrentContext()
+        updated.stepContextSnapshot = ScreenContextCapture.captureCurrentContext()
         updated.lastProgressAt = Date()
         if CompanionSessionPromptFormatter.advanceHint(for: updated) != nil {
             updated.hasShownAdvanceHint = true

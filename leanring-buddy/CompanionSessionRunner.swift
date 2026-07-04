@@ -21,7 +21,7 @@ enum CompanionSessionRunner {
                 if let bridge, !bridge.isEmpty {
                     lines.append(bridge)
                 }
-                let result = await ClickyAppActionExecutor.execute(action)
+                let result = await PinkyAppActionExecutor.execute(action)
                 lines.append(result)
             }
         }

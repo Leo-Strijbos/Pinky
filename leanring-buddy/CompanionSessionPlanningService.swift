@@ -10,14 +10,14 @@ import Foundation
 @MainActor
 final class CompanionSessionPlanningService {
     private let claudeAPI: ClaudeAPI
-    private let playbookManager: PlaybookManager
+    private let skillManager: SkillManager
 
     private(set) var pendingClarification: CompanionSessionPlanningClarification?
     private(set) var pendingRetryTranscript: String?
 
-    init(claudeAPI: ClaudeAPI, playbookManager: PlaybookManager) {
+    init(claudeAPI: ClaudeAPI, skillManager: SkillManager) {
         self.claudeAPI = claudeAPI
-        self.playbookManager = playbookManager
+        self.skillManager = skillManager
     }
 
     func clearPendingClarification() {
@@ -79,7 +79,7 @@ final class CompanionSessionPlanningService {
         }
 
         let taskHints = CompanionSessionTaskClassifier.hints(for: trimmedTranscript)
-        let knowledgeAppendix = playbookManager.plannerReferenceAppendix(for: trimmedTranscript)
+        let knowledgeAppendix = skillManager.plannerReferenceAppendix(for: trimmedTranscript)
         let taskArchetypeAppendix = CompanionAgentPrompt.taskArchetypeAppendix(for: taskHints.archetype)
         let webSearchAppendix = try await planningResearchAppendix(
             transcript: trimmedTranscript,

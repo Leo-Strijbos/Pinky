@@ -13,12 +13,12 @@ import Foundation
 struct CompanionPointAtElementCapability: CompanionCapability {
     let name = "point_at_element"
     let kind: CompanionCapabilityKind = .act
-    let scopes: Set<CompanionCapabilityScope> = [.agent, .guideStep, .onboarding]
+    let scopes: Set<CompanionCapabilityScope> = [.agent, .guideStep]
 
     let toolDefinition: [String: Any] = [
         "name": "point_at_element",
         "description": """
-        Point Clicky's on-screen cursor at a UI element to help the user navigate. \
+        Point Pinky's on-screen cursor at a UI element to help the user navigate. \
         Use when showing where to click would help. Coordinates are in screenshot pixel space \
         (origin top-left; dimensions are in the image label).
         """,
@@ -91,12 +91,12 @@ struct CompanionShowPanelCapability: CompanionCapability {
             return .failure("missing panel query")
         }
 
-        let payload: ClickyWebResultPayload?
+        let payload: PinkyWebResultPayload?
         switch kind {
         case "stock":
-            payload = ClickyWebResultPayloadBuilder.stockChart(ticker: query)
+            payload = PinkyWebResultPayloadBuilder.stockChart(ticker: query)
         case "places":
-            payload = ClickyWebResultPayloadBuilder.placesMap(searchQuery: query)
+            payload = PinkyWebResultPayloadBuilder.placesMap(searchQuery: query)
         default:
             payload = nil
         }
@@ -121,7 +121,7 @@ struct CompanionPresentDocumentCapability: CompanionCapability {
     let toolDefinition: [String: Any] = [
         "name": "present_document",
         "description": """
-        Open a local document in Clicky's floating document window or the system default app. \
+        Open a local document in Pinky's floating document window or the system default app. \
         Use for PDFs and other files the user should see while you explain them.
         """,
         "input_schema": [
@@ -137,7 +137,7 @@ struct CompanionPresentDocumentCapability: CompanionCapability {
                 ],
                 "open_in_system_app": [
                     "type": "boolean",
-                    "description": "When true, open in Preview/default app instead of Clicky's panel",
+                    "description": "When true, open in Preview/default app instead of Pinky's panel",
                 ],
             ],
             "required": ["file_path"],
@@ -146,7 +146,7 @@ struct CompanionPresentDocumentCapability: CompanionCapability {
 
     func execute(input: [String: Any], context: CompanionCapabilityContext) async -> CompanionCapabilityResult {
         guard let rawPath = CompanionCapabilityInput.trimmedString(input["file_path"]),
-              let fileURL = ClickyFilePathResolver.resolve(rawPath) else {
+              let fileURL = PinkyFilePathResolver.resolve(rawPath) else {
             return .failure("could not resolve file path")
         }
 
@@ -164,8 +164,8 @@ struct CompanionPresentDocumentCapability: CompanionCapability {
             return .success("opened \(title) in the default app")
         }
 
-        let source = ClickyKnowledgeSourceDocument(
-            documentID: fileURL.path,
+        let source = SkillSourceDocument(
+            skillName: fileURL.path,
             title: title,
             fileURL: fileURL,
             pageIndex: 0
@@ -216,7 +216,7 @@ struct CompanionPresentCopyableContentCapability: CompanionCapability {
             return .failure("missing body")
         }
 
-        guard let payload = ClickyCopyableContentPayloadBuilder.build(
+        guard let payload = PinkyCopyableContentPayloadBuilder.build(
             title: CompanionCapabilityInput.trimmedString(input["title"]),
             body: body,
             kindRaw: CompanionCapabilityInput.trimmedString(input["kind"]),
@@ -269,15 +269,15 @@ struct CompanionOpenURLCapability: CompanionCapability {
 
     func execute(input: [String: Any], context: CompanionCapabilityContext) async -> CompanionCapabilityResult {
         guard let rawURL = CompanionCapabilityInput.trimmedString(input["url"]),
-              let url = ClickyURLActionParser.normalizedURL(from: rawURL) else {
+              let url = PinkyURLActionParser.normalizedURL(from: rawURL) else {
             return .failure("invalid url")
         }
 
         let browser = CompanionCapabilityInput.trimmedString(input["browser"]).map {
-            ClickyKnownApplication.normalizedName(from: $0)
+            PinkyKnownApplication.normalizedName(from: $0)
         }
         let newTab = CompanionCapabilityInput.boolValue(input["new_tab"], default: true)
-        let spoken = ClickyOpenURLActionHandler.openURL(url, browser: browser, newTab: newTab)
+        let spoken = PinkyOpenURLActionHandler.openURL(url, browser: browser, newTab: newTab)
         return spoken.contains("couldn't") ? .failure(spoken) : .success(spoken)
     }
 }
@@ -307,8 +307,8 @@ struct CompanionOpenAppCapability: CompanionCapability {
             return .failure("missing app name")
         }
 
-        let normalized = ClickyKnownApplication.normalizedName(from: appName)
-        let handler = ClickyOpenAppActionHandler()
+        let normalized = PinkyKnownApplication.normalizedName(from: appName)
+        let handler = PinkyOpenAppActionHandler()
         guard let spoken = await handler.execute(.openApp(appName: normalized)) else {
             return .failure("could not open \(appName)")
         }
@@ -352,7 +352,7 @@ struct CompanionReadPDFCapability: CompanionCapability {
 
     func execute(input: [String: Any], context: CompanionCapabilityContext) async -> CompanionCapabilityResult {
         guard let rawPath = CompanionCapabilityInput.trimmedString(input["file_path"]),
-              let fileURL = ClickyFilePathResolver.resolve(rawPath) else {
+              let fileURL = PinkyFilePathResolver.resolve(rawPath) else {
             return .failure("could not resolve file path")
         }
 
@@ -363,7 +363,7 @@ struct CompanionReadPDFCapability: CompanionCapability {
         let maxPages = CompanionCapabilityInput.intValue(input["max_pages"]) ?? 10
         let maxChars = CompanionCapabilityInput.intValue(input["max_chars"]) ?? 12_000
 
-        guard let text = ClickyPDFTextExtractor.extractText(from: fileURL, maxPages: maxPages, maxChars: maxChars) else {
+        guard let text = PinkyPDFTextExtractor.extractText(from: fileURL, maxPages: maxPages, maxChars: maxChars) else {
             return .failure("could not extract text from pdf")
         }
 
@@ -399,7 +399,7 @@ struct CompanionReadFileCapability: CompanionCapability {
 
     func execute(input: [String: Any], context: CompanionCapabilityContext) async -> CompanionCapabilityResult {
         guard let rawPath = CompanionCapabilityInput.trimmedString(input["file_path"]),
-              let fileURL = ClickyFilePathResolver.resolve(rawPath) else {
+              let fileURL = PinkyFilePathResolver.resolve(rawPath) else {
             return .failure("could not resolve file path")
         }
 

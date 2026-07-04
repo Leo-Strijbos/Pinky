@@ -42,7 +42,7 @@ enum SkipPolicy: Equatable {
 enum StepCompletionPolicy: Equatable {
     case manual
     case visionCheck(description: String)
-    case playbookStep(stepID: String)
+    case skillStep(stepID: String)
 }
 
 struct CompanionSessionPolicy: Equatable {
@@ -72,7 +72,7 @@ struct CompanionGuideStep: Equatable {
     let completion: StepCompletionPolicy
     let pointing: PointingPolicy
     let skipPolicy: SkipPolicy
-    let playbookStepIDs: [String]?
+    let skillStepIDs: [String]?
 
     init(
         instruction: String,
@@ -81,7 +81,7 @@ struct CompanionGuideStep: Equatable {
         completion: StepCompletionPolicy,
         pointing: PointingPolicy,
         skipPolicy: SkipPolicy = .ifAlreadyComplete,
-        playbookStepIDs: [String]? = nil
+        skillStepIDs: [String]? = nil
     ) {
         self.instruction = instruction
         self.lookFor = lookFor
@@ -89,13 +89,13 @@ struct CompanionGuideStep: Equatable {
         self.completion = completion
         self.pointing = pointing
         self.skipPolicy = skipPolicy
-        self.playbookStepIDs = playbookStepIDs
+        self.skillStepIDs = skillStepIDs
     }
 }
 
 enum CompanionSessionStep: Equatable {
     case guide(CompanionGuideStep)
-    case appAction(ClickyAppAction, bridge: String?)
+    case appAction(PinkyAppAction, bridge: String?)
 }
 
 struct CompanionSessionPlan: Equatable {
@@ -104,8 +104,8 @@ struct CompanionSessionPlan: Equatable {
     let source: CompanionSessionPlanSource
     let policy: CompanionSessionPolicy
     let steps: [CompanionSessionStep]
-    let playbookID: String?
-    let playbookSteps: [PlaybookStep]?
+    let skillName: String?
+    let skillSteps: [SkillPlaybackStep]?
     let startIndex: Int
 
     init(
@@ -114,8 +114,8 @@ struct CompanionSessionPlan: Equatable {
         source: CompanionSessionPlanSource,
         policy: CompanionSessionPolicy = .default,
         steps: [CompanionSessionStep],
-        playbookID: String? = nil,
-        playbookSteps: [PlaybookStep]? = nil,
+        skillName: String? = nil,
+        skillSteps: [SkillPlaybackStep]? = nil,
         startIndex: Int = 0
     ) {
         self.id = id
@@ -123,8 +123,8 @@ struct CompanionSessionPlan: Equatable {
         self.source = source
         self.policy = policy
         self.steps = steps
-        self.playbookID = playbookID
-        self.playbookSteps = playbookSteps
+        self.skillName = skillName
+        self.skillSteps = skillSteps
         self.startIndex = startIndex
     }
 }
@@ -133,7 +133,7 @@ struct CompanionActiveSession: Equatable {
     let plan: CompanionSessionPlan
     var currentIndex: Int
     var awaitingAdvance: Bool
-    var stepContextSnapshot: PlaybookScreenContext?
+    var stepContextSnapshot: ScreenContext?
     var stepReadyAt: Date?
     var hasShownAdvanceHint: Bool
     var coachingMode: CoachingMode
@@ -146,7 +146,7 @@ struct CompanionActiveSession: Equatable {
         plan: CompanionSessionPlan,
         currentIndex: Int,
         awaitingAdvance: Bool,
-        stepContextSnapshot: PlaybookScreenContext?,
+        stepContextSnapshot: ScreenContext?,
         stepReadyAt: Date?,
         hasShownAdvanceHint: Bool,
         coachingMode: CoachingMode = .leading,
@@ -218,14 +218,14 @@ struct CompanionActiveSession: Equatable {
             lines.append("substeps: \(substeps.joined(separator: " → "))")
         }
 
-        if let playbookID = plan.playbookID, plan.source == .storedProcedure {
-            lines.insert("matched company playbook id: \(playbookID)", at: 1)
+        if let skillName = plan.skillName, plan.source == .storedProcedure {
+            lines.insert("matched company skill: \(skillName)", at: 1)
         }
 
-        if let milestoneSteps = milestonePlaybookSteps(), let last = milestoneSteps.last {
-            lines.append("playbook step: \(last.title)")
-        } else if let playbookStep = plan.playbookSteps?[safe: currentIndex] {
-            lines.append("playbook step: \(playbookStep.title)")
+        if let milestoneSteps = milestoneSkillSteps(), let last = milestoneSteps.last {
+            lines.append("skill step: \(last.title)")
+        } else if let skillStep = plan.skillSteps?[safe: currentIndex] {
+            lines.append("skill step: \(skillStep.title)")
         }
 
         if currentIndex + 1 < plan.steps.count,
@@ -237,9 +237,9 @@ struct CompanionActiveSession: Equatable {
         return lines.joined(separator: "\n")
     }
 
-    func milestonePlaybookSteps() -> [PlaybookStep]? {
-        guard let ids = currentGuideStep?.playbookStepIDs,
-              let allSteps = plan.playbookSteps else {
+    func milestoneSkillSteps() -> [SkillPlaybackStep]? {
+        guard let ids = currentGuideStep?.skillStepIDs,
+              let allSteps = plan.skillSteps else {
             return nil
         }
 

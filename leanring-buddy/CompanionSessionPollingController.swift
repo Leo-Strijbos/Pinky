@@ -20,10 +20,8 @@ final class CompanionSessionPollingController {
 
     func startPolling(
         sessionManager: CompanionSessionManager,
-        workflowManager: PlaybookManager,
+        workflowManager: SkillManager,
         shouldSkipAdvance: @escaping @MainActor () -> Bool = { false },
-        onCheckStarted: @escaping @MainActor () -> Void = {},
-        onCheckFinished: @escaping @MainActor () -> Void = {},
         onOutcome: @escaping @MainActor (CompanionSessionOutcome) -> Void
     ) {
         stopPolling()
@@ -33,8 +31,6 @@ final class CompanionSessionPollingController {
                 sessionManager: sessionManager,
                 workflowManager: workflowManager,
                 shouldSkipAdvance: shouldSkipAdvance,
-                onCheckStarted: onCheckStarted,
-                onCheckFinished: onCheckFinished,
                 onOutcome: onOutcome
             )
 
@@ -46,8 +42,6 @@ final class CompanionSessionPollingController {
                     sessionManager: sessionManager,
                     workflowManager: workflowManager,
                     shouldSkipAdvance: shouldSkipAdvance,
-                    onCheckStarted: onCheckStarted,
-                    onCheckFinished: onCheckFinished,
                     onOutcome: onOutcome
                 )
             }
@@ -61,20 +55,13 @@ final class CompanionSessionPollingController {
 
     private func runPollCycle(
         sessionManager: CompanionSessionManager,
-        workflowManager: PlaybookManager,
+        workflowManager: SkillManager,
         shouldSkipAdvance: @escaping @MainActor () -> Bool,
-        onCheckStarted: @escaping @MainActor () -> Void,
-        onCheckFinished: @escaping @MainActor () -> Void,
         onOutcome: @escaping @MainActor (CompanionSessionOutcome) -> Void
     ) async {
         guard !Task.isCancelled else { return }
         guard sessionManager.activeSession != nil else { return }
-
-        onCheckStarted()
-
-        defer {
-            onCheckFinished()
-        }
+        guard !shouldSkipAdvance() else { return }
 
         guard let pending = await sessionManager.checkForAutoAdvance(
             workflowManager: workflowManager,

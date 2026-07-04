@@ -19,25 +19,23 @@ enum CompanionCapabilityScope {
     case agent
     /// Walkthrough guide step — pointing only.
     case guideStep
-    /// Onboarding demo — pointing only.
-    case onboarding
 }
 
 @MainActor
 struct CompanionCapabilityContext {
     var screenCapture: CompanionScreenCapture?
-    var documentWindowManager: ClickyDocumentWindowManager?
-    var resultWindowManager: ClickyResultWindowManager?
-    var copyableContentWindowManager: ClickyCopyableContentWindowManager?
-    var onCopyableContentDelivered: ((ClickyCopyableContentPayload) -> Void)?
+    var documentWindowManager: PinkyDocumentWindowManager?
+    var resultWindowManager: PinkyResultWindowManager?
+    var copyableContentWindowManager: PinkyCopyableContentWindowManager?
+    var onCopyableContentDelivered: ((PinkyCopyableContentPayload) -> Void)?
 
     static let empty = CompanionCapabilityContext()
 }
 
 struct CompanionTurnEffects: Equatable {
     var pointTarget: CompanionPointTarget?
-    var panelPayload: ClickyWebResultPayload?
-    var copyableContent: ClickyCopyableContentPayload?
+    var panelPayload: PinkyWebResultPayload?
+    var copyableContent: PinkyCopyableContentPayload?
 
     mutating func merge(_ other: CompanionTurnEffects) {
         if let pointTarget = other.pointTarget {

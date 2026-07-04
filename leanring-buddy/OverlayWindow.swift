@@ -8,7 +8,6 @@
 //
 
 import AppKit
-import AVFoundation
 import SwiftUI
 
 class OverlayWindow: NSWindow {
@@ -101,7 +100,7 @@ enum BuddyNavigationMode {
 // the cursor is currently on THIS screen and only shows the buddy
 // triangle when idle. During voice interaction, the triangle is
 // replaced by a waveform (listening) or spinner (processing).
-// The triangle stays visible while idle and while Clicky speaks.
+// The triangle stays visible while idle and while Pinky speaks.
 struct BlueCursorView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
@@ -124,8 +123,8 @@ struct BlueCursorView: View {
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
 
         let hostScreen = NSScreen.screens.first { $0.frame == screenFrame }
-        if let hostScreen, ClickyNotchScreenSupport.isNotchHostScreen(hostScreen) {
-            let notchPoint = ClickyNotchScreenSupport.buddyHandScreenPoint(on: hostScreen)
+        if let hostScreen, PinkyNotchScreenSupport.isNotchHostScreen(hostScreen) {
+            let notchPoint = PinkyNotchScreenSupport.buddyHandScreenPoint(on: hostScreen)
             let x = notchPoint.x - screenFrame.origin.x
             let y = screenFrame.height - (notchPoint.y - screenFrame.origin.y)
             _buddyPosition = State(initialValue: CGPoint(x: x, y: y))
@@ -149,7 +148,7 @@ struct BlueCursorView: View {
 
     /// The rotation angle of the buddy hand in degrees.
     /// Default is 45° (pointer asset orientation). Changes to face travel direction when navigating.
-    @State private var buddyRotationDegrees: Double = ClickyBuddyAvatar.pointerIdleRotation
+    @State private var buddyRotationDegrees: Double = PinkyBuddyAvatar.pointerIdleRotation
 
     /// True during the first-open welcome wave before switching to the pointer hand.
     @State private var isShowingWelcomeWave = false
@@ -181,12 +180,7 @@ struct BlueCursorView: View {
         isShowingWelcomeWave || buddyNavigationMode != .restingAtNotch
     }
 
-    // MARK: - Onboarding Video Layout
-
-    private let onboardingVideoPlayerWidth: CGFloat = 330
-    private let onboardingVideoPlayerHeight: CGFloat = 186
-
-    private let fullWelcomeMessage = "hey! i'm clicky"
+    private let fullWelcomeMessage = "hey! i'm pinky"
 
     private let navigationPointerPhrases = [
         "right here!",
@@ -230,23 +224,7 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Onboarding video — always in the view tree so opacity animation works
-            // reliably. When no player exists or opacity is 0, nothing is visible.
-            // allowsHitTesting(false) prevents it from intercepting clicks.
-            OnboardingVideoPlayerView(player: companionManager.onboardingVideoPlayer)
-                .frame(width: onboardingVideoPlayerWidth, height: onboardingVideoPlayerHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
-                .opacity(isNotchHostScreen ? companionManager.onboardingVideoOpacity : 0)
-                .position(
-                    x: buddyPosition.x + 10 + (onboardingVideoPlayerWidth / 2),
-                    y: buddyPosition.y + 18 + (onboardingVideoPlayerHeight / 2)
-                )
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: buddyPosition)
-                .animation(.easeInOut(duration: 2.0), value: companionManager.onboardingVideoOpacity)
-                .allowsHitTesting(false)
-
-            // Onboarding prompt — "press control + option and say hi" streamed after video ends
+            // Onboarding prompt — streamed after the welcome animation
             if isNotchHostScreen && companionManager.showOnboardingPrompt && !companionManager.onboardingPromptText.isEmpty {
                 Text(companionManager.onboardingPromptText)
                     .font(.system(size: 11, weight: .medium))
@@ -311,7 +289,7 @@ struct BlueCursorView: View {
             }
 
             // Waving hand — first launch welcome only.
-            ClickyHandWaveView(
+            PinkyHandWaveView(
                 swingDegrees: waveSwingDegrees,
                 scale: buddyFlightScale,
                 glowIntensity: buddyFlightScale
@@ -323,7 +301,7 @@ struct BlueCursorView: View {
             .animation(.easeInOut(duration: 0.18), value: waveSwingDegrees)
 
             // Pointer hand — pointing flights only (idle hand lives in the notch).
-            ClickyHandPointerView(
+            PinkyHandPointerView(
                 rotationDegrees: buddyRotationDegrees,
                 scale: buddyFlightScale,
                 glowIntensity: buddyFlightScale
@@ -353,7 +331,7 @@ struct BlueCursorView: View {
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorIndicatorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
-            // Spinner — next to the cursor while Clicky is checking or processing.
+            // Spinner — next to the cursor while Pinky is checking or processing.
             BlueCursorSpinnerView()
                 .opacity(
                     isCursorOnThisScreen
@@ -364,6 +342,25 @@ struct BlueCursorView: View {
                 .position(cursorIndicatorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorIndicatorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
+
+            // Teaching pill — beside the cursor while Pinky is learning a workflow.
+            TeachingPillView(
+                stepCount: companionManager.teachingStepCount,
+                isProcessing: companionManager.isTeachingProcessing
+            )
+            .opacity(
+                isCursorOnThisScreen
+                    && (companionManager.isTeaching || companionManager.isTeachingProcessing)
+                    ? 1 : 0
+            )
+            .allowsHitTesting(false)
+            .position(
+                x: cursorIndicatorPosition.x + 56,
+                y: cursorIndicatorPosition.y - 4
+            )
+            .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorIndicatorPosition)
+            .animation(.easeInOut(duration: 0.2), value: companionManager.isTeaching)
+            .animation(.easeInOut(duration: 0.2), value: companionManager.teachingStepCount)
 
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
@@ -389,7 +386,6 @@ struct BlueCursorView: View {
         .onDisappear {
             cursorTrackingTimer?.invalidate()
             navigationAnimationTimer?.invalidate()
-            companionManager.tearDownOnboardingVideo()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
             guard newLocation != nil else { return }
@@ -422,7 +418,7 @@ struct BlueCursorView: View {
 
     private var isNotchHostScreen: Bool {
         guard let hostScreen else { return false }
-        return ClickyNotchScreenSupport.isNotchHostScreen(hostScreen)
+        return PinkyNotchScreenSupport.isNotchHostScreen(hostScreen)
     }
 
     /// Whether the overlay buddy should render on this screen.
@@ -438,7 +434,7 @@ struct BlueCursorView: View {
 
     private func notchHandPositionInSwiftUI() -> CGPoint {
         guard let hostScreen else { return buddyPosition }
-        let notchPoint = ClickyNotchScreenSupport.buddyHandScreenPoint(on: hostScreen)
+        let notchPoint = PinkyNotchScreenSupport.buddyHandScreenPoint(on: hostScreen)
         return convertScreenPointToSwiftUICoordinates(notchPoint)
     }
 
@@ -503,7 +499,7 @@ struct BlueCursorView: View {
         } else {
             buddyPosition = clampedTarget
         }
-        buddyRotationDegrees = ClickyBuddyAvatar.pointerIdleRotation
+        buddyRotationDegrees = PinkyBuddyAvatar.pointerIdleRotation
 
         // Enter navigation mode
         buddyNavigationMode = .navigatingToTarget
@@ -609,7 +605,7 @@ struct BlueCursorView: View {
         buddyNavigationMode = .pointingAtTarget
 
         // Rotate back to default pointer angle now that we've arrived
-        buddyRotationDegrees = ClickyBuddyAvatar.pointerIdleRotation
+        buddyRotationDegrees = PinkyBuddyAvatar.pointerIdleRotation
 
         // Reset navigation bubble state — start small for the scale-bounce entrance
         navigationBubbleText = ""
@@ -681,7 +677,7 @@ struct BlueCursorView: View {
         navigationAnimationTimer?.invalidate()
         navigationAnimationTimer = nil
         buddyNavigationMode = .restingAtNotch
-        buddyRotationDegrees = ClickyBuddyAvatar.pointerIdleRotation
+        buddyRotationDegrees = PinkyBuddyAvatar.pointerIdleRotation
         buddyFlightScale = 1.0
         buddyOpacity = 0.0
         navigationBubbleText = ""
@@ -727,8 +723,7 @@ struct BlueCursorView: View {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     self.showWelcome = false
-                    // Start the onboarding video right after the welcome text disappears
-                    self.companionManager.setupOnboardingVideo()
+                    self.companionManager.finishWelcomeAnimation()
                 }
                 return
             }
@@ -781,7 +776,7 @@ private struct BlueCursorWaveformView: View {
 
 // MARK: - Cursor Spinner
 
-/// Spinning indicator beside the cursor while Clicky processes a voice input.
+/// Spinning indicator beside the cursor while Pinky processes a voice input.
 private struct BlueCursorSpinnerView: View {
     @State private var isSpinning = false
 
@@ -872,46 +867,5 @@ class OverlayWindowManager {
 
     func isShowingOverlay() -> Bool {
         return !overlayWindows.isEmpty
-    }
-}
-
-// MARK: - Onboarding Video Player
-
-/// NSViewRepresentable wrapping an AVPlayerLayer so HLS video plays
-/// inside SwiftUI. Uses a custom NSView subclass to keep the player
-/// layer sized to the view's bounds automatically.
-private struct OnboardingVideoPlayerView: NSViewRepresentable {
-    let player: AVPlayer?
-
-    func makeNSView(context: Context) -> AVPlayerNSView {
-        let view = AVPlayerNSView()
-        view.player = player
-        return view
-    }
-
-    func updateNSView(_ nsView: AVPlayerNSView, context: Context) {
-        nsView.player = player
-    }
-}
-
-private class AVPlayerNSView: NSView {
-    var player: AVPlayer? {
-        didSet { playerLayer.player = player }
-    }
-
-    private let playerLayer = AVPlayerLayer()
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        playerLayer.videoGravity = .resizeAspectFill
-        layer?.addSublayer(playerLayer)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        playerLayer.frame = bounds
     }
 }

@@ -11,8 +11,8 @@ enum CompanionScreenContextDelta {
 
     /// Returns true when the user likely navigated away from the step's starting screen.
     static func hasMeaningfulChange(
-        from before: PlaybookScreenContext?,
-        to after: PlaybookScreenContext
+        from before: ScreenContext?,
+        to after: ScreenContext
     ) -> Bool {
         guard let before else { return false }
 

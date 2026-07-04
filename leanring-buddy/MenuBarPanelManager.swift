@@ -16,8 +16,8 @@ import Combine
 import SwiftUI
 
 extension Notification.Name {
-    static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
-    static let clickyShowPanel = Notification.Name("clickyShowPanel")
+    static let pinkyDismissPanel = Notification.Name("pinkyDismissPanel")
+    static let pinkyShowPanel = Notification.Name("pinkyShowPanel")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -38,14 +38,14 @@ final class MenuBarPanelManager: NSObject {
     private var voiceStateCancellables = Set<AnyCancellable>()
 
     private let companionManager: CompanionManager
-    private let dynamicNotchBridge = ClickyDynamicNotchBridge()
-    private let fallbackPillModel = ClickyNotchFallbackPillModel()
-    private let panelWidth: CGFloat = ClickyResponsePanelLayout.width
-    private let panelHeight: CGFloat = ClickyResponsePanelLayout.height
+    private let dynamicNotchBridge = PinkyDynamicNotchBridge()
+    private let fallbackPillModel = PinkyNotchFallbackPillModel()
+    private let panelWidth: CGFloat = PinkyResponsePanelLayout.width
+    private let panelHeight: CGFloat = PinkyResponsePanelLayout.height
     private static var fallbackPillContentSize: NSSize {
         NSSize(
-            width: ClickyNotchFallbackPillView.contentWidth,
-            height: ClickyNotchFallbackPillView.contentHeight
+            width: PinkyNotchFallbackPillView.contentWidth,
+            height: PinkyNotchFallbackPillView.contentHeight
         )
     }
     private var usesNotchDropdownPosition = false
@@ -61,7 +61,7 @@ final class MenuBarPanelManager: NSObject {
         observeVoiceStateForNotch()
 
         dismissPanelObserver = NotificationCenter.default.addObserver(
-            forName: .clickyDismissPanel,
+            forName: .pinkyDismissPanel,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -69,12 +69,12 @@ final class MenuBarPanelManager: NSObject {
         }
 
         showPanelObserver = NotificationCenter.default.addObserver(
-            forName: .clickyShowPanel,
+            forName: .pinkyShowPanel,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            if let screen = ClickyNotchScreenSupport.preferredNotchScreen() {
+            if let screen = PinkyNotchScreenSupport.preferredNotchScreen() {
                 self.showPanelFromNotchInteraction(on: screen)
             } else {
                 self.showPanel()
@@ -98,18 +98,18 @@ final class MenuBarPanelManager: NSObject {
     /// Starts the top-of-screen notch surface and hover probe that reveals the
     /// settings panel when the pointer enters the notch region.
     func startNotchSurface() {
-        guard let screen = ClickyNotchScreenSupport.preferredNotchScreen() else { return }
+        guard let screen = PinkyNotchScreenSupport.preferredNotchScreen() else { return }
 
         anchorScreen = screen
         updateStatusItemVisibility()
 
-        if ClickyNotchScreenSupport.hasPhysicalNotch(on: screen) {
+        if PinkyNotchScreenSupport.hasPhysicalNotch(on: screen) {
             isUsingDynamicNotchSurface = true
             notchSurfaceDisplayID = screen.displayID
             dynamicNotchBridge.showCompact(on: screen) { [weak self] in
                 self?.showPanelFromNotchInteraction(on: screen)
             }
-        } else if ClickyNotchScreenSupport.hasBuiltInNotchDisplay() {
+        } else if PinkyNotchScreenSupport.hasBuiltInNotchDisplay() {
             isUsingDynamicNotchSurface = false
             notchSurfaceDisplayID = screen.displayID
         } else {
@@ -129,7 +129,7 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        button.image = makeClickyMenuBarIcon()
+        button.image = makePinkyMenuBarIcon()
         button.image?.isTemplate = true
         button.action = #selector(statusItemClicked)
         button.target = self
@@ -139,13 +139,13 @@ final class MenuBarPanelManager: NSObject {
 
     private func updateStatusItemVisibility() {
         if #available(macOS 13.0, *) {
-            statusItem?.isVisible = !ClickyNotchScreenSupport.hasBuiltInNotchDisplay()
+            statusItem?.isVisible = !PinkyNotchScreenSupport.hasBuiltInNotchDisplay()
         }
     }
 
-    /// Draws the clicky triangle as a menu bar icon. Uses the same shape
+    /// Draws the pinky triangle as a menu bar icon. Uses the same shape
     /// and rotation as the in-app cursor so the menu bar icon matches.
-    private func makeClickyMenuBarIcon() -> NSImage {
+    private func makePinkyMenuBarIcon() -> NSImage {
         let iconSize: CGFloat = 18
         let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
         image.lockFocus()
@@ -183,8 +183,8 @@ final class MenuBarPanelManager: NSObject {
     /// permissions and the start button right away.
     func showPanelOnLaunch() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            if ClickyNotchScreenSupport.hasBuiltInNotchDisplay(),
-               let screen = ClickyNotchScreenSupport.preferredNotchScreen() {
+            if PinkyNotchScreenSupport.hasBuiltInNotchDisplay(),
+               let screen = PinkyNotchScreenSupport.preferredNotchScreen() {
                 self.showPanelFromNotchInteraction(on: screen)
             } else {
                 self.usesNotchDropdownPosition = false
@@ -213,7 +213,7 @@ final class MenuBarPanelManager: NSObject {
         let menu = NSMenu()
 
         let openItem = NSMenuItem(
-            title: "Open Clicky",
+            title: "Open Pinky",
             action: #selector(openPanelFromStatusMenu),
             keyEquivalent: ""
         )
@@ -223,7 +223,7 @@ final class MenuBarPanelManager: NSObject {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
-            title: "Quit Clicky",
+            title: "Quit Pinky",
             action: #selector(quitFromStatusMenu),
             keyEquivalent: "q"
         )
@@ -295,7 +295,7 @@ final class MenuBarPanelManager: NSObject {
         let mouseLocation = NSEvent.mouseLocation
 
         if let hoveredScreen = NSScreen.screens.first(where: {
-            ClickyNotchScreenSupport.notchHoverRegion(on: $0).contains(mouseLocation)
+            PinkyNotchScreenSupport.notchHoverRegion(on: $0).contains(mouseLocation)
         }) {
             anchorScreen = hoveredScreen
             ensureNotchSurface(on: hoveredScreen)
@@ -320,13 +320,13 @@ final class MenuBarPanelManager: NSObject {
         guard notchSurfaceDisplayID != screen.displayID else { return }
         notchSurfaceDisplayID = screen.displayID
 
-        if ClickyNotchScreenSupport.hasPhysicalNotch(on: screen) {
+        if PinkyNotchScreenSupport.hasPhysicalNotch(on: screen) {
             isUsingDynamicNotchSurface = true
             fallbackPillPanel?.orderOut(nil)
             dynamicNotchBridge.showCompact(on: screen) { [weak self] in
                 self?.showPanelFromNotchInteraction(on: screen)
             }
-        } else if ClickyNotchScreenSupport.hasBuiltInNotchDisplay() {
+        } else if PinkyNotchScreenSupport.hasBuiltInNotchDisplay() {
             // MacBook with a built-in notch: keep DynamicNotchKit on the laptop
             // display and use an invisible hover target on external monitors.
             isUsingDynamicNotchSurface = false
@@ -357,7 +357,7 @@ final class MenuBarPanelManager: NSObject {
     }
 
     private func createFallbackPillPanel(on screen: NSScreen) {
-        let pillView = ClickyNotchFallbackPillView(model: fallbackPillModel)
+        let pillView = PinkyNotchFallbackPillView(model: fallbackPillModel)
 
         let hostingView = NSHostingView(rootView: pillView)
         hostingView.frame = NSRect(origin: .zero, size: Self.fallbackPillContentSize)
@@ -390,7 +390,7 @@ final class MenuBarPanelManager: NSObject {
 
         let pillSize = Self.fallbackPillContentSize
         let originX = screen.frame.midX - pillSize.width / 2
-        let originY = ClickyNotchScreenSupport.statusSurfaceY(for: pillSize, on: screen)
+        let originY = PinkyNotchScreenSupport.statusSurfaceY(for: pillSize, on: screen)
         fallbackPillPanel.setFrame(
             NSRect(x: originX, y: originY, width: pillSize.width, height: pillSize.height),
             display: true
@@ -426,7 +426,7 @@ final class MenuBarPanelManager: NSObject {
     }
 
     private func createPanel() {
-        let companionPanelView = ClickyResponsePanelView(companionManager: companionManager)
+        let companionPanelView = PinkyResponsePanelView(companionManager: companionManager)
             .frame(width: panelWidth, height: panelHeight)
 
         let hostingView = NSHostingView(rootView: companionPanelView)
@@ -462,9 +462,9 @@ final class MenuBarPanelManager: NSObject {
 
         let actualPanelHeight = panelHeight
 
-        if usesNotchDropdownPosition, let notchScreen = screen ?? anchorScreen ?? ClickyNotchScreenSupport.preferredNotchScreen() {
+        if usesNotchDropdownPosition, let notchScreen = screen ?? anchorScreen ?? PinkyNotchScreenSupport.preferredNotchScreen() {
             let panelSize = NSSize(width: panelWidth, height: actualPanelHeight)
-            let origin = ClickyNotchScreenSupport.dropdownPanelOrigin(for: panelSize, on: notchScreen)
+            let origin = PinkyNotchScreenSupport.dropdownPanelOrigin(for: panelSize, on: notchScreen)
             panel.setFrame(
                 NSRect(x: origin.x, y: origin.y, width: panelWidth, height: actualPanelHeight),
                 display: true

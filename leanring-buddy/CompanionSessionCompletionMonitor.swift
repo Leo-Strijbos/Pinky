@@ -43,7 +43,7 @@ final class CompanionSessionCompletionMonitor {
 
     func checkCompletion(
         session: CompanionActiveSession,
-        workflowManager: PlaybookManager,
+        workflowManager: SkillManager,
         context: CompanionCompletionCheckContext
     ) async -> CompanionStepCompletionResult? {
         guard session.awaitingAdvance,
@@ -63,8 +63,8 @@ final class CompanionSessionCompletionMonitor {
         case .manual:
             return nil
 
-        case .playbookStep(let stepID):
-            return checkPlaybookStep(stepID: stepID, session: session)
+        case .skillStep(let stepID):
+            return checkSkillStep(stepID: stepID, session: session)
 
         case .visionCheck(let description):
             return await checkVision(
@@ -77,7 +77,7 @@ final class CompanionSessionCompletionMonitor {
 
     private func hasMeaningfulContextChange(for session: CompanionActiveSession) -> Bool {
         guard let snapshot = session.stepContextSnapshot else { return false }
-        let currentContext = PlaybookScreenContextCapture.captureCurrentContext()
+        let currentContext = ScreenContextCapture.captureCurrentContext()
         return CompanionScreenContextDelta.hasMeaningfulChange(from: snapshot, to: currentContext)
     }
 
@@ -90,7 +90,7 @@ final class CompanionSessionCompletionMonitor {
             return nil
         }
 
-        let currentContext = PlaybookScreenContextCapture.captureCurrentContext()
+        let currentContext = ScreenContextCapture.captureCurrentContext()
         guard CompanionScreenContextDelta.hasMeaningfulChange(from: snapshot, to: currentContext) else {
             return nil
         }
@@ -98,7 +98,7 @@ final class CompanionSessionCompletionMonitor {
         switch session.currentGuideStep?.completion {
         case .manual, .none:
             return .completed(reason: "context-delta")
-        case .visionCheck, .playbookStep:
+        case .visionCheck, .skillStep:
             return nil
         }
     }
@@ -108,21 +108,21 @@ final class CompanionSessionCompletionMonitor {
         return Date().timeIntervalSince(stepReadyAt) >= Self.minimumStepDwellSeconds
     }
 
-    private func checkPlaybookStep(
+    private func checkSkillStep(
         stepID: String,
         session: CompanionActiveSession
     ) -> CompanionStepCompletionResult? {
         guard
-            let target = session.plan.playbookSteps?.first(where: { $0.id == stepID })
+            let target = session.plan.skillSteps?.first(where: { $0.id == stepID })
         else {
             return nil
         }
 
-        let context = PlaybookScreenContextCapture.captureCurrentContext()
-        let score = PlaybookContextMatcher.matchScore(for: target, context: context)
+        let context = ScreenContextCapture.captureCurrentContext()
+        let score = ScreenContextMatcher.matchScore(for: target, context: context)
         guard score >= 0.42 else { return nil }
 
-        return .completed(reason: "playbook-step")
+        return .completed(reason: "skill-step")
     }
 
     private func checkVision(

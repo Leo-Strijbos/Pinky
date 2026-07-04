@@ -16,8 +16,8 @@ struct CompanionPointTarget: Equatable {
 
 struct CompanionAgentTurnResult: Equatable {
     let spokenText: String
-    let sources: [ClickyWebSource]
+    let sources: [PinkyWebSource]
     let usedWebSearch: Bool
     let pointTarget: CompanionPointTarget?
-    let panelPayload: ClickyWebResultPayload?
+    let panelPayload: PinkyWebResultPayload?
 }

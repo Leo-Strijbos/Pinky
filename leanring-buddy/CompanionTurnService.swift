@@ -10,23 +10,23 @@ import Foundation
 @MainActor
 final class CompanionTurnService {
     private let claudeAPI: ClaudeAPI
-    private let playbookManager: PlaybookManager
+    private let skillManager: SkillManager
     private let capabilityRegistry: CompanionCapabilityRegistry
 
     init(
         claudeAPI: ClaudeAPI,
-        playbookManager: PlaybookManager,
+        skillManager: SkillManager,
         capabilityRegistry: CompanionCapabilityRegistry = .standard
     ) {
         self.claudeAPI = claudeAPI
-        self.playbookManager = playbookManager
+        self.skillManager = skillManager
         self.capabilityRegistry = capabilityRegistry
     }
 
     struct AgentTurnDelivery {
         let result: CompanionAgentTurnResult
         let cursorScreenCapture: CompanionScreenCapture
-        let procedureRetrieval: PlaybookRetrieval?
+        let procedureRetrieval: SkillRetrieval?
         let screenStepIndex: Int?
     }
 
@@ -39,13 +39,30 @@ final class CompanionTurnService {
     ) async throws -> AgentTurnDelivery {
         let cursorScreenCapture = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
 
-        let procedureAppendix = ""
-        let retrieval: PlaybookRetrieval? = nil
-        let screenStepIndex: Int? = nil
+        let resolved = skillManager.resolveProcedureContext(
+            for: transcript,
+            pinnedSession: pinnedProcedureSession
+        )
 
-        let knowledgeAppendix = ""
-        let needsLiveData = ClickyLiveDataQuery.requiresFreshWebSearch(transcript)
-        let liveDataAppendix = needsLiveData ? ClickyLiveDataQuery.liveDataSystemPromptAppendix : nil
+        let procedureAppendix: String
+        if pinnedProcedureSession != nil {
+            procedureAppendix = skillManager.procedureAppendix(
+                retrieval: resolved.retrieval,
+                screenStepIndex: resolved.screenStepIndex,
+                pinnedSession: pinnedProcedureSession
+            )
+        } else if let retrieval = resolved.retrieval {
+            procedureAppendix = retrieval.overviewPromptFragment()
+        } else {
+            procedureAppendix = ""
+        }
+
+        let knowledgeAppendix = skillManager.plannerReferenceAppendix(
+            for: transcript,
+            includeForProcedural: true
+        )
+        let needsLiveData = PinkyLiveDataQuery.requiresFreshWebSearch(transcript)
+        let liveDataAppendix = needsLiveData ? PinkyLiveDataQuery.liveDataSystemPromptAppendix : nil
 
         let systemPrompt = CompanionAgentPrompt.agentSystemPrompt(
             workflowAppendix: procedureAppendix,
@@ -54,7 +71,7 @@ final class CompanionTurnService {
         )
 
         let userPrompt = needsLiveData
-            ? ClickyLiveDataQuery.forcedSearchUserPrompt(for: transcript)
+            ? PinkyLiveDataQuery.forcedSearchUserPrompt(for: transcript)
             : transcript
 
         let labeledImages = labeledImages(from: cursorScreenCapture)
@@ -77,9 +94,9 @@ final class CompanionTurnService {
             print("⚠️ Live-data query — web search not used, retrying with forced search")
             agentResult = try await claudeAPI.sendVisionAgentTurn(
                 images: labeledImages,
-                systemPrompt: systemPrompt + "\n\n" + ClickyLiveDataQuery.liveDataSystemPromptAppendix,
+                systemPrompt: systemPrompt + "\n\n" + PinkyLiveDataQuery.liveDataSystemPromptAppendix,
                 conversationHistory: conversationHistory,
-                userPrompt: ClickyLiveDataQuery.forcedSearchUserPrompt(for: transcript),
+                userPrompt: PinkyLiveDataQuery.forcedSearchUserPrompt(for: transcript),
                 model: model,
                 includeWebSearch: true,
                 capabilityRegistry: capabilityRegistry,
@@ -89,19 +106,19 @@ final class CompanionTurnService {
         }
 
         if pinnedProcedureSession == nil {
-            playbookManager.pinReferencePlaybook(id: nil)
+            skillManager.pinReferenceSkill(name: nil)
         }
 
         return AgentTurnDelivery(
             result: agentResult,
             cursorScreenCapture: cursorScreenCapture,
-            procedureRetrieval: retrieval,
-            screenStepIndex: screenStepIndex
+            procedureRetrieval: resolved.retrieval,
+            screenStepIndex: resolved.screenStepIndex
         )
     }
 
-    func sourceDocumentsToPresent(for query: String) -> [ClickyKnowledgeSourceDocument] {
-        []
+    func sourceDocumentsToPresent(for query: String) -> [SkillSourceDocument] {
+        skillManager.sourceDocuments(for: query)
     }
 
     func runGuideStepTurn(
@@ -140,28 +157,6 @@ final class CompanionTurnService {
             cursorScreenCapture: cursorScreenCapture,
             procedureRetrieval: nil,
             screenStepIndex: session.currentIndex
-        )
-    }
-
-    func runOnboardingDemoTurn(
-        cursorScreenCapture: CompanionScreenCapture,
-        model: String,
-        capabilityContext: CompanionCapabilityContext
-    ) async throws -> CompanionAgentTurnResult {
-        let labeledImages = labeledImages(from: cursorScreenCapture)
-        var context = capabilityContext
-        context.screenCapture = cursorScreenCapture
-
-        return try await claudeAPI.sendVisionAgentTurn(
-            images: labeledImages,
-            systemPrompt: CompanionAgentPrompt.onboardingDemo,
-            conversationHistory: [],
-            userPrompt: "look around my screen and find something interesting to point at",
-            model: model,
-            includeWebSearch: false,
-            capabilityRegistry: capabilityRegistry,
-            capabilityScope: .onboarding,
-            capabilityContext: context
         )
     }
 

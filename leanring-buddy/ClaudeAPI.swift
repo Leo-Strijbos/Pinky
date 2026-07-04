@@ -391,7 +391,7 @@ class ClaudeAPI {
             )
         }
 
-        var accumulatedSources: [ClickyWebSource] = []
+        var accumulatedSources: [PinkyWebSource] = []
         var seenSourceURLs = Set<String>()
         var usedWebSearch = false
         var turnEffects = CompanionTurnEffects()
@@ -533,15 +533,15 @@ class ClaudeAPI {
 
     private struct ParsedClaudeMessageResponse {
         let text: String
-        let sources: [ClickyWebSource]
+        let sources: [PinkyWebSource]
         let stopReason: String
         let assistantContent: [[String: Any]]
         let usedWebSearch: Bool
     }
 
     private func mergeSources(
-        _ newSources: [ClickyWebSource],
-        into accumulatedSources: inout [ClickyWebSource],
+        _ newSources: [PinkyWebSource],
+        into accumulatedSources: inout [PinkyWebSource],
         seenURLs: inout Set<String>
     ) {
         for source in newSources {
@@ -661,7 +661,7 @@ class ClaudeAPI {
         let contentBlocks = json["content"] as? [[String: Any]] ?? []
 
         var textParts: [String] = []
-        var sources: [ClickyWebSource] = []
+        var sources: [PinkyWebSource] = []
         var seenSourceURLs = Set<String>()
         var usedWebSearch = false
 
@@ -722,7 +722,7 @@ class ClaudeAPI {
 
     private func appendSource(
         from dictionary: [String: Any],
-        to sources: inout [ClickyWebSource],
+        to sources: inout [PinkyWebSource],
         seenURLs: inout Set<String>
     ) {
         guard let urlString = dictionary["url"] as? String,
@@ -737,7 +737,7 @@ class ClaudeAPI {
         let title = (dictionary["title"] as? String)
             ?? url.host
             ?? normalizedURL
-        sources.append(ClickyWebSource(title: title, url: url))
+        sources.append(PinkyWebSource(title: title, url: url))
     }
 
     private static let maxRetryAttempts = 3

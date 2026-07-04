@@ -134,7 +134,7 @@ enum CompanionSessionPlanningBriefFormatter {
         _ transcript: String,
         pending: CompanionSessionPlanningClarification
     ) -> Bool {
-        if ClickyVoiceLocalAppActionParser.parse(transcript: transcript) != nil {
+        if PinkyVoiceLocalAppActionParser.parse(transcript: transcript) != nil {
             return true
         }
 
@@ -150,7 +150,7 @@ enum CompanionSessionPlanningBriefFormatter {
             return true
         }
 
-        guard ClickyProcedureQuery.isStepByStepIntent(transcript) else {
+        guard PinkyProcedureQuery.isStepByStepIntent(transcript) else {
             return false
         }
 
@@ -164,7 +164,7 @@ enum CompanionSessionPlanningBriefFormatter {
         let stopWords: Set<String> = [
             "a", "an", "the", "to", "on", "in", "at", "for", "of", "and", "or", "then",
             "how", "what", "where", "when", "why", "walk", "through", "step", "show",
-            "i", "me", "my", "it", "this", "that", "do", "did", "please", "clicky",
+            "i", "me", "my", "it", "this", "that", "do", "did", "please", "pinky",
         ]
 
         return Set(

@@ -29,7 +29,7 @@ struct leanring_buddyTests {
     }
 
     @Test func voiceRouterUsesQuickLocalForGreeting() async throws {
-        let decision = CompanionVoiceRouter.resolve(transcript: "hey clicky")
+        let decision = CompanionVoiceRouter.resolve(transcript: "hey pinky")
         #expect(decision.route == .quickLocal)
         #expect(decision.cannedResponse == "i'm here.")
     }
@@ -62,17 +62,17 @@ struct leanring_buddyTests {
     }
 
     @Test func sessionPhrasesDetectAdvanceExitAndCancel() async throws {
-        #expect(ClickyVoiceSessionPhrases.isAdvance("next step"))
-        #expect(ClickyVoiceSessionPhrases.isAdvance("what do i do next"))
-        #expect(ClickyVoiceSessionPhrases.isExit("i've got it from here"))
-        #expect(ClickyVoiceSessionPhrases.isExit("skip the rest"))
-        #expect(ClickyVoiceSessionPhrases.isCancel("stop walkthrough"))
-        #expect(ClickyVoiceSessionPhrases.isRestart("start over"))
-        #expect(!ClickyVoiceSessionPhrases.isLikelyStepQuestion("next"))
+        #expect(PinkyVoiceSessionPhrases.isAdvance("next step"))
+        #expect(PinkyVoiceSessionPhrases.isAdvance("what do i do next"))
+        #expect(PinkyVoiceSessionPhrases.isExit("i've got it from here"))
+        #expect(PinkyVoiceSessionPhrases.isExit("skip the rest"))
+        #expect(PinkyVoiceSessionPhrases.isCancel("stop walkthrough"))
+        #expect(PinkyVoiceSessionPhrases.isRestart("start over"))
+        #expect(!PinkyVoiceSessionPhrases.isLikelyStepQuestion("next"))
     }
 
     @Test func compoundParserBuildsOrderedAppActions() async throws {
-        let steps = ClickyVoiceCompoundCommandParser.parse(
+        let steps = PinkyVoiceCompoundCommandParser.parse(
             transcript: "open safari then go to github.com"
         )
 
@@ -87,7 +87,7 @@ struct leanring_buddyTests {
     }
 
     @Test func compoundParserRejectsSingleCommand() async throws {
-        let steps = ClickyVoiceCompoundCommandParser.parse(transcript: "open spotify")
+        let steps = PinkyVoiceCompoundCommandParser.parse(transcript: "open spotify")
         #expect(steps == nil)
     }
 
@@ -138,26 +138,26 @@ struct leanring_buddyTests {
     }
 
     @Test func knowledgePolicyQuestionIsNotStepByStepIntent() async throws {
-        #expect(!ClickyProcedureQuery.isStepByStepIntent("what's our new employee onboarding policy?"))
-        #expect(!ClickyProcedureQuery.isStepByStepIntent("tell me about the vacation policy"))
-        #expect(ClickyKnowledgeRetriever.isKnowledgeDocumentQuery("what's our new employee onboarding policy?"))
+        #expect(!PinkyProcedureQuery.isStepByStepIntent("what's our new employee onboarding policy?"))
+        #expect(!PinkyProcedureQuery.isStepByStepIntent("tell me about the vacation policy"))
+        #expect(SkillRetriever.isReferenceQuery("what's our new employee onboarding policy?"))
     }
 
     @Test func proceduralKnowledgeQuestionIsStillStepByStepIntent() async throws {
-        #expect(ClickyProcedureQuery.isStepByStepIntent("walk me through our onboarding policy"))
-        #expect(ClickyProcedureQuery.isStepByStepIntent("how do i follow the vacation policy"))
+        #expect(PinkyProcedureQuery.isStepByStepIntent("walk me through our onboarding policy"))
+        #expect(PinkyProcedureQuery.isStepByStepIntent("how do i follow the vacation policy"))
     }
 
     @Test func walkthroughRoutingSkipsScriptRunFollowUps() async throws {
-        #expect(!ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        #expect(!PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: "how do I use this/run this? Where should I run it?",
             context: .empty
         ))
-        #expect(!ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        #expect(!PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: "okay, I've copied it. how do I run it now?",
             context: .empty
         ))
-        #expect(!ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        #expect(!PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: "how do I run this python script in terminal?",
             context: .empty
         ))
@@ -174,22 +174,22 @@ struct leanring_buddyTests {
             recentCopyableKind: .code
         )
 
-        #expect(!ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        #expect(!PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: "how do I use this? Where should I run it?",
             context: context
         ))
-        #expect(!ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        #expect(!PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: "okay, what's next?",
             context: context
         ))
     }
 
     @Test func walkthroughRoutingStillStartsGreenfieldHowTo() async throws {
-        #expect(ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        #expect(PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: "show me how to view my battery health",
             context: .empty
         ))
-        #expect(ClickyProcedureQuery.shouldStartWalkthroughPlanning(
+        #expect(PinkyProcedureQuery.shouldStartWalkthroughPlanning(
             transcript: "how do i make a repo private",
             context: .empty
         ))
@@ -212,7 +212,7 @@ struct leanring_buddyTests {
         )
         let outcome = await manager.process(
             transcript: "okay, I've copied it. how do I run it now?",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor,
             routingContext: context
         )
@@ -225,7 +225,7 @@ struct leanring_buddyTests {
         let monitor = CompanionSessionCompletionMonitor(claudeAPI: ClaudeAPI(proxyURL: "https://example.com", model: "claude-haiku-4-5"))
         let outcome = await manager.process(
             transcript: "how do i make a repo private",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor
         )
         #expect(outcome == .needsPlan(transcript: "how do i make a repo private"))
@@ -237,7 +237,7 @@ struct leanring_buddyTests {
         let monitor = CompanionSessionCompletionMonitor(claudeAPI: ClaudeAPI(proxyURL: "https://example.com", model: "claude-haiku-4-5"))
         let outcome = await manager.process(
             transcript: "what's our new employee onboarding policy?",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor
         )
         #expect(outcome == nil)
@@ -271,14 +271,14 @@ struct leanring_buddyTests {
             hasShownAdvanceHint: false
         )
 
-        #expect(!ClickyVoiceSessionContinuity.continuesWalkthrough("what's the weather", session: session))
+        #expect(!PinkyVoiceSessionContinuity.continuesWalkthrough("what's the weather", session: session))
 
         let manager = CompanionSessionManager()
         manager.debugSetActiveSession(session)
         let monitor = CompanionSessionCompletionMonitor(claudeAPI: ClaudeAPI(proxyURL: "https://example.com", model: "claude-haiku-4-5"))
         let outcome = await manager.process(
             transcript: "what's the weather",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor
         )
         if case .exitAndContinue(let remaining) = outcome {
@@ -318,7 +318,7 @@ struct leanring_buddyTests {
         )
 
         #expect(
-            ClickyVoiceSessionContinuity.continuesWalkthrough("okay, and now?", session: session)
+            PinkyVoiceSessionContinuity.continuesWalkthrough("okay, and now?", session: session)
         )
     }
 
@@ -358,7 +358,7 @@ struct leanring_buddyTests {
         )
         let outcome = await manager.process(
             transcript: "okay, and now?",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor
         )
 
@@ -400,7 +400,7 @@ struct leanring_buddyTests {
         )
 
         #expect(
-            ClickyVoiceSessionContinuity.continuesWalkthrough(
+            PinkyVoiceSessionContinuity.continuesWalkthrough(
                 "okay i've clicked on darwin gp what do i do next",
                 session: session
             )
@@ -434,7 +434,7 @@ struct leanring_buddyTests {
             plan: plan,
             currentIndex: 0,
             awaitingAdvance: true,
-            stepContextSnapshot: PlaybookScreenContextCapture.captureCurrentContext(),
+            stepContextSnapshot: ScreenContextCapture.captureCurrentContext(),
             stepReadyAt: Date(),
             hasShownAdvanceHint: true
         ))
@@ -442,7 +442,7 @@ struct leanring_buddyTests {
         let monitor = CompanionSessionCompletionMonitor(claudeAPI: ClaudeAPI(proxyURL: "https://example.com", model: "claude-haiku-4-5"))
         let outcome = await manager.process(
             transcript: "i'm good",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor
         )
 
@@ -456,9 +456,9 @@ struct leanring_buddyTests {
 
     @Test func milestoneCompilerGroupsSharedScreenSteps() async throws {
         let steps = [
-            PlaybookStep(
+            SkillPlaybackStep(
                 id: "s1",
-                playbookID: "wf-test",
+                skillName: "wf-test",
                 index: 0,
                 title: "Open menu",
                 instruction: "open the file menu",
@@ -470,9 +470,9 @@ struct leanring_buddyTests {
                 thumbnailFilename: nil,
                 capturedAt: Date()
             ),
-            PlaybookStep(
+            SkillPlaybackStep(
                 id: "s2",
-                playbookID: "wf-test",
+                skillName: "wf-test",
                 index: 1,
                 title: "Choose export",
                 instruction: "choose export as pdf",
@@ -484,9 +484,9 @@ struct leanring_buddyTests {
                 thumbnailFilename: nil,
                 capturedAt: Date()
             ),
-            PlaybookStep(
+            SkillPlaybackStep(
                 id: "s3",
-                playbookID: "wf-test",
+                skillName: "wf-test",
                 index: 2,
                 title: "Confirm export",
                 instruction: "click save",
@@ -500,20 +500,20 @@ struct leanring_buddyTests {
             ),
         ]
 
-        let groups = PlaybookMilestoneCompiler.groups(from: steps)
+        let groups = SkillMilestoneCompiler.groups(from: steps)
         #expect(groups.count == 2)
         #expect(groups[0].steps.count == 2)
         #expect(groups[1].steps.count == 1)
 
-        let guide = PlaybookSessionAdapter.guideStep(for: groups[0], orderedSteps: steps)
+        let guide = SkillSessionAdapter.guideStep(for: groups[0], orderedSteps: steps)
         #expect(guide.substeps?.count == 2)
-        #expect(guide.playbookStepIDs == ["s1", "s2"])
-        #expect(guide.completion == .playbookStep(stepID: "s3"))
+        #expect(guide.skillStepIDs == ["s1", "s2"])
+        #expect(guide.completion == .skillStep(stepID: "s3"))
     }
 
     @Test func screenContextDeltaDetectsNavigation() async throws {
-        let before = PlaybookScreenContext(app: "Safari", url: "https://github.com/a/b", windowTitle: "Repo")
-        let after = PlaybookScreenContext(app: "Safari", url: "https://github.com/a/b/settings", windowTitle: "Settings")
+        let before = ScreenContext(app: "Safari", url: "https://github.com/a/b", windowTitle: "Repo")
+        let after = ScreenContext(app: "Safari", url: "https://github.com/a/b/settings", windowTitle: "Settings")
         #expect(CompanionScreenContextDelta.hasMeaningfulChange(from: before, to: after))
         #expect(!CompanionScreenContextDelta.hasMeaningfulChange(from: before, to: before))
     }
@@ -530,9 +530,9 @@ struct leanring_buddyTests {
     @MainActor
     @Test func sessionManagerHandlesAdvanceAndCancel() async throws {
         let workflowSteps = [
-            PlaybookStep(
+            SkillPlaybackStep(
                 id: "s1",
-                playbookID: "wf-test",
+                skillName: "wf-test",
                 index: 0,
                 title: "Open menu",
                 instruction: "open the file menu",
@@ -544,9 +544,9 @@ struct leanring_buddyTests {
                 thumbnailFilename: "s1.jpg",
                 capturedAt: Date()
             ),
-            PlaybookStep(
+            SkillPlaybackStep(
                 id: "s2",
-                playbookID: "wf-test",
+                skillName: "wf-test",
                 index: 1,
                 title: "Choose export",
                 instruction: "choose export as pdf",
@@ -559,8 +559,8 @@ struct leanring_buddyTests {
                 capturedAt: Date()
             ),
         ]
-        let guide = PlaybookSessionAdapter.guideStep(
-            for: PlaybookMilestoneGroup(steps: [workflowSteps[0]]),
+        let guide = SkillSessionAdapter.guideStep(
+            for: SkillMilestoneGroup(steps: [workflowSteps[0]]),
             orderedSteps: workflowSteps
         )
         let plan = CompanionSessionPlan(
@@ -573,11 +573,11 @@ struct leanring_buddyTests {
                     lookFor: "Choose export",
                     completion: .manual,
                     pointing: .ifOnScreen,
-                    playbookStepIDs: ["s2"]
+                    skillStepIDs: ["s2"]
                 )),
             ],
-            playbookID: "wf-test",
-            playbookSteps: workflowSteps
+            skillName: "wf-test",
+            skillSteps: workflowSteps
         )
 
         let manager = CompanionSessionManager()
@@ -585,7 +585,7 @@ struct leanring_buddyTests {
             plan: plan,
             currentIndex: 0,
             awaitingAdvance: true,
-            stepContextSnapshot: PlaybookScreenContextCapture.captureCurrentContext(),
+            stepContextSnapshot: ScreenContextCapture.captureCurrentContext(),
             stepReadyAt: Date(),
             hasShownAdvanceHint: true
         ))
@@ -593,7 +593,7 @@ struct leanring_buddyTests {
         let monitor = CompanionSessionCompletionMonitor(claudeAPI: ClaudeAPI(proxyURL: "https://example.com", model: "claude-haiku-4-5"))
         let advance = await manager.process(
             transcript: "next",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor
         )
         if case .executeGuideStep(let session) = advance {
@@ -604,7 +604,7 @@ struct leanring_buddyTests {
 
         let cancel = await manager.process(
             transcript: "stop",
-            workflowManager: PlaybookManager(),
+            workflowManager: SkillManager(),
             completionMonitor: monitor
         )
         if case .ended(let spoken) = cancel {
@@ -647,7 +647,7 @@ struct leanring_buddyTests {
             plan: plan,
             currentIndex: 0,
             awaitingAdvance: true,
-            stepContextSnapshot: PlaybookScreenContext(app: "Preview", url: nil, windowTitle: "Doc"),
+            stepContextSnapshot: ScreenContext(app: "Preview", url: nil, windowTitle: "Doc"),
             stepReadyAt: Date().addingTimeInterval(-10),
             hasShownAdvanceHint: true,
             consecutiveAutoAdvances: 1
@@ -696,13 +696,13 @@ struct leanring_buddyTests {
     }
 
     @Test func exitPhraseExtractsTrailingCommand() async throws {
-        let command = ClickyVoiceSessionPhrases.commandAfterWalkthroughExit(
+        let command = PinkyVoiceSessionPhrases.commandAfterWalkthroughExit(
             in: "Okay, I'm all right, thank you. I've got it from here. Can you please open up Spotify and play Back in Black?"
         )
         #expect(command.contains("open up spotify"))
         #expect(command.contains("play back in black"))
 
-        let steps = ClickyVoiceCompoundCommandParser.parse(transcript: command)
+        let steps = PinkyVoiceCompoundCommandParser.parse(transcript: command)
         #expect(steps?.count == 2)
     }
 
@@ -731,14 +731,14 @@ struct leanring_buddyTests {
 
     @Test func filePathResolverExpandsTildePaths() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let resolved = ClickyFilePathResolver.resolve("~/")
+        let resolved = PinkyFilePathResolver.resolve("~/")
         #expect(resolved?.standardizedFileURL.path == home.standardizedFileURL.path)
     }
 
     @Test func readFileCapabilityReadsPlainText() async throws {
         let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("clicky-capability-test.txt")
-        try "hello from clicky".write(to: tempURL, atomically: true, encoding: .utf8)
+            .appendingPathComponent("pinky-capability-test.txt")
+        try "hello from pinky".write(to: tempURL, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
         let registry = CompanionCapabilityRegistry.standard
@@ -749,7 +749,7 @@ struct leanring_buddyTests {
         )
 
         #expect(result.success)
-        #expect(result.toolResultContent.contains("hello from clicky"))
+        #expect(result.toolResultContent.contains("hello from pinky"))
     }
 
     @Test func actionSpeechSummarizesOpenURLAndPoint() async throws {
@@ -791,7 +791,7 @@ struct leanring_buddyTests {
     }
 
     @Test func copyableContentCapabilityOpensWindowPayload() async throws {
-        let payload = ClickyCopyableContentPayloadBuilder.build(
+        let payload = PinkyCopyableContentPayloadBuilder.build(
             title: "Hello script",
             body: "print('hi')",
             kindRaw: "code",
@@ -896,7 +896,7 @@ struct leanring_buddyTests {
 
     @Test func planningScreenContextAppendixIncludesPlatformAndIrrelevanceHint() async throws {
         let appendix = CompanionSessionPlanningContext.screenContextAppendix(
-            for: PlaybookScreenContext(
+            for: ScreenContext(
                 app: "Safari",
                 url: "https://example.com",
                 windowTitle: "Example Page"
@@ -927,6 +927,94 @@ struct leanring_buddyTests {
         let fallback = CompanionSessionPlanner.planFromTopology(topology)
         #expect(fallback?.steps.count == 3)
         #expect(fallback?.steps[0].instruction.contains("Zapier") == true)
+    }
+
+    @Test func teachingSaveConfirmationDetectsAffirmativeAndNegative() async throws {
+        #expect(TeachingSaveConfirmation.isAffirmative("yes"))
+        #expect(TeachingSaveConfirmation.isAffirmative("yeah save it"))
+        #expect(TeachingSaveConfirmation.isNegative("no"))
+        #expect(TeachingSaveConfirmation.isNegative("never mind"))
+        #expect(!TeachingSaveConfirmation.isAffirmative("submit expense report"))
+    }
+
+    @Test func teachingSegmentBuilderGroupsKeyframesWithNarration() async throws {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let artifact = TeachingArtifact(
+            startedAt: startedAt,
+            finishedAt: startedAt.addingTimeInterval(30),
+            signals: [
+                TimestampedSignal(
+                    timestamp: startedAt,
+                    signal: .context(ContextSnapshot(app: "Workday", url: nil, windowTitle: "Home"))
+                ),
+                TimestampedSignal(
+                    timestamp: startedAt,
+                    signal: .speech(TranscriptSegment(text: "Open Workday", source: .pushToTalk))
+                ),
+                TimestampedSignal(
+                    timestamp: startedAt.addingTimeInterval(10),
+                    signal: .context(ContextSnapshot(app: "Workday", url: "https://workday.example/expenses", windowTitle: "Expenses"))
+                ),
+            ],
+            keyframes: [
+                TeachingKeyframe(
+                    id: "kf-0",
+                    timestamp: startedAt,
+                    jpegData: Data([0x01]),
+                    visualFingerprint: "abc",
+                    cursorLocation: .zero,
+                    context: ContextSnapshot(app: "Workday", url: nil, windowTitle: "Home")
+                ),
+                TeachingKeyframe(
+                    id: "kf-1",
+                    timestamp: startedAt.addingTimeInterval(10),
+                    jpegData: Data([0x02]),
+                    visualFingerprint: "def",
+                    cursorLocation: .zero,
+                    context: ContextSnapshot(app: "Workday", url: "https://workday.example/expenses", windowTitle: "Expenses")
+                ),
+            ]
+        )
+
+        let segments = TeachingSegmentBuilder.segments(from: artifact)
+        #expect(segments.contains { $0.narrations == ["Open Workday"] })
+        #expect(segments.contains { $0.context?.url?.contains("expenses") == true })
+    }
+
+    @Test func teachingStepSynthesizerCleansMetaNarration() async throws {
+        let cleaned = TeachingStepSynthesizer.cleanNarration(
+            "Okay, Clicky, I'm going to teach you how I, uh, order protein powder. So the first thing you do is go to Holland and Barrett."
+        )
+        #expect(!cleaned.lowercased().contains("clicky"))
+        #expect(!cleaned.lowercased().contains("teach you"))
+        #expect(cleaned.contains("Holland and Barrett"))
+    }
+
+    @Test func teachingStepSynthesizerUsesURLInsteadOfOCRGarbage() async throws {
+        let label = TeachingStepSynthesizer.label(
+            segment: TeachingSegment(
+                startTime: Date(),
+                endTime: Date(),
+                context: ContextSnapshot(
+                    app: "Google Chrome",
+                    url: "https://www.hollandandbarrett.com/search?query=protein+powder",
+                    windowTitle: "Search"
+                ),
+                narrations: [],
+                clickCount: 0,
+                keyframeID: nil
+            ),
+            artifact: TeachingArtifact(
+                startedAt: Date(),
+                finishedAt: Date(),
+                signals: [],
+                keyframes: []
+            )
+        )
+
+        #expect(label.instruction.contains("protein powder"))
+        #expect(!label.instruction.contains("chrymo"))
+        #expect(!label.instruction.contains("bodkmatks"))
     }
 
 }

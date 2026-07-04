@@ -53,17 +53,9 @@ final class CompanionManager: ObservableObject {
     /// BlueCursorView observes this to replay pointing when the overlay remounts.
     @Published private(set) var pointingRequestEpoch = 0
 
-    // MARK: - Onboarding Video State (shared across all screen overlays)
-
-    @Published var onboardingVideoPlayer: AVPlayer?
-    @Published var showOnboardingVideo: Bool = false
-    @Published var onboardingVideoOpacity: Double = 0.0
-    private var onboardingVideoEndObserver: NSObjectProtocol?
-    private var onboardingDemoTimeObserver: Any?
-
     // MARK: - Onboarding Prompt Bubble
 
-    /// Text streamed character-by-character on the cursor after the onboarding video ends.
+    /// Text streamed character-by-character on the cursor after the welcome animation.
     @Published var onboardingPromptText: String = ""
     @Published var onboardingPromptOpacity: Double = 0.0
     @Published var showOnboardingPrompt: Bool = false
@@ -82,7 +74,7 @@ final class CompanionManager: ObservableObject {
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let globalTypedCommandShortcutMonitor = GlobalTypedCommandShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
-    private lazy var commandPaletteWindowManager = ClickyCommandPaletteWindowManager(companionManager: self)
+    private lazy var commandPaletteWindowManager = PinkyCommandPaletteWindowManager(companionManager: self)
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -98,12 +90,12 @@ final class CompanionManager: ObservableObject {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
 
-    let playbookManager = PlaybookManager()
+    let skillManager = SkillManager()
 
     private lazy var turnService: CompanionTurnService = {
         CompanionTurnService(
             claudeAPI: claudeAPI,
-            playbookManager: playbookManager
+            skillManager: skillManager
         )
     }()
 
@@ -112,7 +104,7 @@ final class CompanionManager: ObservableObject {
     private lazy var sessionPlanningService: CompanionSessionPlanningService = {
         CompanionSessionPlanningService(
             claudeAPI: claudeAPI,
-            playbookManager: playbookManager
+            skillManager: skillManager
         )
     }()
 
@@ -127,14 +119,20 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isWalkthroughActive = false
     @Published private(set) var walkthroughStatusText: String?
 
+    /// Mirrored from SkillManager so overlay SwiftUI views update reliably.
+    @Published private(set) var isTeaching = false
+    @Published private(set) var teachingStepCount = 0
+    @Published private(set) var isTeachingProcessing = false
+    @Published var isTeachingBriefPresented = false
+
     /// Opens embedded WebView panels for stock charts and places lookups.
-    var resultWindowManager: ClickyResultWindowManager?
+    var resultWindowManager: PinkyResultWindowManager?
 
     /// Opens PDF panels for knowledge-base source documents.
-    var documentWindowManager: ClickyDocumentWindowManager?
+    var documentWindowManager: PinkyDocumentWindowManager?
 
     /// Opens floating panels for generated copyable content.
-    var copyableContentWindowManager: ClickyCopyableContentWindowManager?
+    var copyableContentWindowManager: PinkyCopyableContentWindowManager?
 
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
@@ -142,7 +140,7 @@ final class CompanionManager: ObservableObject {
 
     /// Tracks when copyable code/command was last delivered for walkthrough routing.
     private var lastCopyableDeliveryHistoryIndex: Int?
-    private var lastCopyableKind: ClickyCopyableContentPayload.Kind?
+    private var lastCopyableKind: PinkyCopyableContentPayload.Kind?
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -156,7 +154,8 @@ final class CompanionManager: ObservableObject {
     private var typedCommandShortcutCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
-    private var playbookManagerCancellable: AnyCancellable?
+    private var skillManagerCancellable: AnyCancellable?
+    private var teachingStateCancellables = Set<AnyCancellable>()
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
@@ -201,19 +200,14 @@ final class CompanionManager: ObservableObject {
             }()
             sessionPollingController.startPolling(
                 sessionManager: sessionManager,
-                workflowManager: playbookManager,
+                workflowManager: skillManager,
                 shouldSkipAdvance: { [weak self] in
                     self?.shouldDeferWalkthroughAutomation ?? false
                 },
-                onCheckStarted: { [weak self] in
-                    self?.beginWalkthroughChecking()
-                },
-                onCheckFinished: { [weak self] in
-                    self?.endWalkthroughChecking()
+                onOutcome: { [weak self] outcome in
+                    self?.deliverWalkthroughOutcome(outcome)
                 }
-            ) { [weak self] outcome in
-                self?.deliverWalkthroughOutcome(outcome)
-            }
+            )
             ensurePointingOverlayVisible()
         } else {
             isWalkthroughActive = false
@@ -222,25 +216,14 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    private func beginWalkthroughChecking() {
-        guard sessionManager.activeSession?.awaitingAdvance == true else { return }
-        guard voiceState == .idle else { return }
-        guard currentResponseTask == nil else { return }
-        voiceState = .checking
-    }
-
     private var shouldDeferWalkthroughAutomation: Bool {
-        buddyDictationManager.isDictationInProgress
+        isTeaching
+            || skillManager.isTeaching
+            || buddyDictationManager.isDictationInProgress
             || buddyDictationManager.isFinalizingTranscript
             || buddyDictationManager.isPreparingToRecord
             || voiceState == .listening
             || currentResponseTask != nil
-    }
-
-    private func endWalkthroughChecking() {
-        guard voiceState == .checking else { return }
-        guard currentResponseTask == nil else { return }
-        voiceState = .idle
     }
 
     private func deliverWalkthroughOutcome(_ outcome: CompanionSessionOutcome) {
@@ -285,13 +268,13 @@ final class CompanionManager: ObservableObject {
     /// When enabled, the pointer overlay stays visible at all times.
     /// When disabled (default), the overlay appears only while Ctrl+Option is held
     /// or through an active voice/pointing interaction, then fades out shortly after.
-    @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
+    @Published var isPinkyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isPinkyCursorEnabled") == nil
         ? false
-        : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
+        : UserDefaults.standard.bool(forKey: "isPinkyCursorEnabled")
 
-    func setClickyCursorEnabled(_ enabled: Bool) {
-        isClickyCursorEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")
+    func setPinkyCursorEnabled(_ enabled: Bool) {
+        isPinkyCursorEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isPinkyCursorEnabled")
         transientHideTask?.cancel()
         transientHideTask = nil
 
@@ -340,22 +323,22 @@ final class CompanionManager: ObservableObject {
 
     func start() {
         refreshAllPermissions()
-        print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
+        print("🔑 Pinky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
         bindTypedCommandShortcut()
-        bindPlaybookManagerObservation()
+        bindSkillManagerObservation()
         // Eagerly touch the Claude API so its TLS warmup handshake completes
-        // well before the onboarding demo fires at ~40s into the video.
+        // before the user's first push-to-talk interaction.
         _ = claudeAPI
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
         // panel will show the permissions UI instead.
-        if hasCompletedOnboarding && allPermissionsGranted && isClickyCursorEnabled {
+        if hasCompletedOnboarding && allPermissionsGranted && isPinkyCursorEnabled {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
@@ -365,35 +348,22 @@ final class CompanionManager: ObservableObject {
     /// Called by BlueCursorView after the buddy finishes its pointing
     /// animation and returns to cursor-following mode.
     /// Triggers the onboarding sequence — dismisses the panel and restarts
-    /// the overlay so the welcome animation and intro video play.
+    /// the overlay so the welcome animation plays.
     func triggerOnboarding() {
         // Post notification so the panel manager can dismiss the panel
-        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+        NotificationCenter.default.post(name: .pinkyDismissPanel, object: nil)
 
         // Mark onboarding as completed so the Start button won't appear
         // again on future launches — the cursor will auto-show instead
         hasCompletedOnboarding = true
 
-        ClickyAnalytics.trackOnboardingStarted()
+        PinkyAnalytics.trackOnboardingStarted()
 
         // Play Besaid theme at 60% volume, fade out after 1m 30s
         startOnboardingMusic()
 
         // Show the overlay for the first time — isFirstAppearance triggers
-        // the welcome animation and onboarding video
-        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
-        isOverlayVisible = true
-    }
-
-    /// Replays the onboarding experience from the "Watch Onboarding Again"
-    /// footer link. Same flow as triggerOnboarding but the cursor overlay
-    /// is already visible so we just restart the welcome animation and video.
-    func replayOnboarding() {
-        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-        ClickyAnalytics.trackOnboardingReplayed()
-        startOnboardingMusic()
-        // Tear down any existing overlays and recreate with isFirstAppearance = true
-        overlayWindowManager.hasShownOverlayBefore = false
+        // the welcome animation.
         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
         isOverlayVisible = true
     }
@@ -408,7 +378,7 @@ final class CompanionManager: ObservableObject {
     private func startOnboardingMusic() {
         stopOnboardingMusic()
         guard let musicURL = Bundle.main.url(forResource: "ff", withExtension: "mp3") else {
-            print("⚠️ Clicky: ff.mp3 not found in bundle")
+            print("⚠️ Pinky: ff.mp3 not found in bundle")
             return
         }
 
@@ -423,7 +393,7 @@ final class CompanionManager: ObservableObject {
                 self?.fadeOutOnboardingMusic()
             }
         } catch {
-            print("⚠️ Clicky: Failed to play onboarding music: \(error)")
+            print("⚠️ Pinky: Failed to play onboarding music: \(error)")
         }
     }
 
@@ -533,13 +503,13 @@ final class CompanionManager: ObservableObject {
 
         // Track individual permission grants as they happen
         if !previouslyHadAccessibility && hasAccessibilityPermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "accessibility")
+            PinkyAnalytics.trackPermissionGranted(permission: "accessibility")
         }
         if !previouslyHadScreenRecording && hasScreenRecordingPermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "screen_recording")
+            PinkyAnalytics.trackPermissionGranted(permission: "screen_recording")
         }
         if !previouslyHadMicrophone && hasMicrophonePermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "microphone")
+            PinkyAnalytics.trackPermissionGranted(permission: "microphone")
         }
         // Screen content permission is persisted — once the user has approved the
         // SCShareableContent picker, we don't need to re-check it.
@@ -548,7 +518,7 @@ final class CompanionManager: ObservableObject {
         }
 
         if !previouslyHadAll && allPermissionsGranted {
-            ClickyAnalytics.trackAllPermissionsGranted()
+            PinkyAnalytics.trackAllPermissionsGranted()
         }
 
         refreshSelectedInputDevice()
@@ -573,7 +543,7 @@ final class CompanionManager: ObservableObject {
     var bluetoothInputWarningMessage: String {
         let loweredName = selectedInputDeviceName.lowercased()
         if loweredName.contains("airpod") {
-            return "AirPods can't be used as Clicky's microphone. Open Sound Settings and switch to your Mac's built-in mic instead."
+            return "AirPods can't be used as Pinky's microphone. Open Sound Settings and switch to your Mac's built-in mic instead."
         }
         return "Bluetooth microphones can't be used for voice input. Open Sound Settings and switch to your Mac's built-in mic instead."
     }
@@ -581,7 +551,7 @@ final class CompanionManager: ObservableObject {
     func presentBluetoothInputWarning() {
         streamingResponseText = bluetoothInputWarningMessage
         isResponsePanelStreaming = false
-        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+        NotificationCenter.default.post(name: .pinkyShowPanel, object: nil)
     }
 
     func openSoundInputSettings() {
@@ -619,10 +589,10 @@ final class CompanionManager: ObservableObject {
                     guard didCapture else { return }
                     hasScreenContentPermission = true
                     UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
-                    ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
+                    PinkyAnalytics.trackPermissionGranted(permission: "screen_content")
 
                     // If onboarding was already completed, show the cursor overlay now
-                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
+                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isPinkyCursorEnabled {
                         overlayWindowManager.hasShownOverlayBefore = true
                         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
                         isOverlayVisible = true
@@ -667,12 +637,34 @@ final class CompanionManager: ObservableObject {
             }
     }
 
-    private func bindPlaybookManagerObservation() {
-        playbookManagerCancellable = playbookManager.objectWillChange
+    private func bindSkillManagerObservation() {
+        skillManagerCancellable = skillManager.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
+
+        skillManager.$isTeaching
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isTeaching in
+                self?.isTeaching = isTeaching
+            }
+            .store(in: &teachingStateCancellables)
+
+        skillManager.$teachingStepCount
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] count in
+                self?.teachingStepCount = count
+            }
+            .store(in: &teachingStateCancellables)
+
+        skillManager.$isProcessing
+            .combineLatest(skillManager.$isTeaching)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isProcessing, isTeaching in
+                self?.isTeachingProcessing = isProcessing && !isTeaching
+            }
+            .store(in: &teachingStateCancellables)
     }
 
     func completeOnboarding() {
@@ -698,38 +690,113 @@ final class CompanionManager: ObservableObject {
     }
 
     func resetPlaybookRecordingFromHere() {
-        playbookManager.resetRecordingFromHere()
+        skillManager.resetTeachingFromHere()
     }
 
-    func togglePlaybookRecording() {
-        if playbookManager.isRecording {
+    func toggleTeaching() {
+        if skillManager.isTeaching {
             Task {
-                await playbookManager.stopRecording(claudeAPI: claudeAPI)
+                await finishTeachingSession()
             }
         } else {
-            playbookManager.startRecording()
+            requestTeachingStart()
         }
     }
 
-    func presentPlaybookImport(kind: PlaybookKind) {
-        playbookManager.presentImportPanel(kind: kind, claudeAPI: claudeAPI)
+    func requestTeachingStart() {
+        guard !skillManager.isTeaching, !isTeachingBriefPresented else { return }
+        isTeachingBriefPresented = true
     }
 
-    func startPlaybookWalkthrough(playbookID: String) {
+    func cancelTeachingBrief() {
+        isTeachingBriefPresented = false
+    }
+
+    func completeTeachingBrief() {
+        isTeachingBriefPresented = false
+        startTeachingSession()
+    }
+
+    func togglePlaybookRecording() {
+        toggleTeaching()
+    }
+
+    func startTeachingSession() {
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        // Teaching needs the cursor overlay, but must not replay the first-run
+        // welcome animation (that only belongs in triggerOnboarding).
+        overlayWindowManager.hasShownOverlayBefore = true
+        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        isOverlayVisible = true
+        skillManager.startTeaching()
+        print("📗 Teaching UI active — look for ● Teaching… beside the cursor")
+    }
+
+    func finishTeachingSession() async {
+        voiceState = .processing
+        guard let draft = await skillManager.stopTeaching(claudeAPI: claudeAPI) else {
+            if voiceState == .processing { voiceState = .idle }
+            return
+        }
+
+        let epoch = responseEpoch
+        voiceState = .responding
+        let spokenText = "Got it. I can teach that now. Can I save this as \(draft.suggestedTitle)?"
+        do {
+            try await speakResponseText(spokenText, responseEpochAtStart: epoch)
+        } catch {
+            print("⚠️ Teaching confirmation TTS failed: \(error.localizedDescription)")
+        }
+        if responseEpoch == epoch, voiceState == .responding {
+            voiceState = .idle
+        }
+    }
+
+    func handleTeachingSaveConfirmation(_ transcript: String) async {
+        guard skillManager.pendingDraft != nil else { return }
+
+        let normalized = transcript.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let epoch = responseEpoch
+        voiceState = .responding
+
+        if TeachingSaveConfirmation.isAffirmative(normalized) {
+            let title = skillManager.pendingDraftTitle
+            await skillManager.confirmTeachingSave()
+            let spoken = title.isEmpty ? "Saved." : "Saved as \(title)."
+            try? await speakResponseText(spoken, responseEpochAtStart: epoch)
+        } else if TeachingSaveConfirmation.isNegative(normalized) {
+            skillManager.cancelPendingDraft()
+            try? await speakResponseText("No problem, I won't save it.", responseEpochAtStart: epoch)
+        } else {
+            await skillManager.confirmTeachingSave(title: transcript.trimmingCharacters(in: .whitespacesAndNewlines))
+            try? await speakResponseText("Saved as \(transcript.trimmingCharacters(in: .whitespacesAndNewlines)).", responseEpochAtStart: epoch)
+        }
+
+        if responseEpoch == epoch, voiceState == .responding {
+            voiceState = .idle
+        }
+    }
+
+    func presentSkillImport(kind: SkillKind) {
+        skillManager.presentImportPanel(kind: kind, claudeAPI: claudeAPI)
+    }
+
+    func startSkillWalkthrough(skillName: String) {
         guard let plan = CompanionSessionPlanBuilder.plan(
-            forPlaybookID: playbookID,
-            playbookManager: playbookManager
+            forSkillName: skillName,
+            skillManager: skillManager
         ) else { return }
 
         _ = sessionManager.activatePlan(plan)
         syncWalkthroughState()
     }
 
-    func openPlaybookPDF(playbook: Playbook, fileURL: URL) {
+    func openSkillPDF(skill: AgentSkill, fileURL: URL) {
         documentWindowManager?.show(sources: [
-            ClickyKnowledgeSourceDocument(
-                documentID: playbook.id,
-                title: playbook.title,
+            SkillSourceDocument(
+                skillName: skill.name,
+                title: skill.title,
                 fileURL: fileURL,
                 pageIndex: 0
             ),
@@ -746,7 +813,7 @@ final class CompanionManager: ObservableObject {
             .sink { [weak self] isRecording, isFinalizing, isPreparing in
                 guard let self else { return }
 
-                // User speech always wins — even if Clicky is still in .responding
+                // User speech always wins — even if Pinky is still in .responding
                 // from TTS or a prior response that didn't reset yet.
                 if isRecording {
                     self.voiceState = .listening
@@ -817,8 +884,6 @@ final class CompanionManager: ObservableObject {
         switch transition {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
-            guard !showOnboardingVideo else { return }
-
             if isBluetoothInputDeviceSelected {
                 print("🎙️ Push-to-talk blocked — Bluetooth input not supported (\(selectedInputDeviceName))")
                 presentBluetoothInputWarning()
@@ -833,7 +898,7 @@ final class CompanionManager: ObservableObject {
             ensurePointingOverlayVisible()
 
             // Dismiss the menu bar panel so it doesn't cover the screen
-            NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            NotificationCenter.default.post(name: .pinkyDismissPanel, object: nil)
 
             // Cancel any in-progress response and TTS from a previous utterance
             invalidateCurrentResponse()
@@ -851,7 +916,7 @@ final class CompanionManager: ObservableObject {
             }
     
 
-            ClickyAnalytics.trackPushToTalkStarted()
+            PinkyAnalytics.trackPushToTalkStarted()
 
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = Task {
@@ -863,9 +928,15 @@ final class CompanionManager: ObservableObject {
                     submitDraftText: { [weak self] finalTranscript in
                         self?.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
-                        ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
-                        if self?.playbookManager.isRecording == true {
-                            self?.playbookManager.attachNarration(finalTranscript)
+                        PinkyAnalytics.trackUserMessageSent(transcript: finalTranscript)
+                        if self?.skillManager.isTeaching == true {
+                            self?.skillManager.attachNarration(finalTranscript)
+                            return
+                        }
+                        if self?.skillManager.pendingDraft != nil {
+                            Task {
+                                await self?.handleTeachingSaveConfirmation(finalTranscript)
+                            }
                             return
                         }
                         self?.sendTranscriptToClaude(transcript: finalTranscript)
@@ -877,7 +948,7 @@ final class CompanionManager: ObservableObject {
             // before the async startPushToTalk had a chance to begin recording.
             // Without this, a quick press-and-release drops the release event and
             // leaves the waveform overlay stuck on screen indefinitely.
-            ClickyAnalytics.trackPushToTalkReleased()
+            PinkyAnalytics.trackPushToTalkReleased()
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
@@ -931,7 +1002,7 @@ final class CompanionManager: ObservableObject {
 
                 if let sessionOutcome = await sessionManager.process(
                     transcript: transcript,
-                    workflowManager: playbookManager,
+                    workflowManager: skillManager,
                     completionMonitor: sessionCompletionMonitor,
                     routingContext: walkthroughRoutingContext()
                 ) {
@@ -944,7 +1015,7 @@ final class CompanionManager: ObservableObject {
 
                     case .exitAndContinue(let remainingTranscript):
                         syncWalkthroughState()
-                        let command = ClickyVoiceSessionPhrases.commandAfterWalkthroughExit(
+                        let command = PinkyVoiceSessionPhrases.commandAfterWalkthroughExit(
                             in: remainingTranscript
                         )
                         try await deliverVoiceRoute(
@@ -977,7 +1048,7 @@ final class CompanionManager: ObservableObject {
                     finishResponsePanelStream()
                     return
                 }
-                ClickyAnalytics.trackResponseError(error: error.localizedDescription)
+                PinkyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
                 finishResponsePanelStream()
                 speakCreditsErrorFallback()
@@ -999,7 +1070,7 @@ final class CompanionManager: ObservableObject {
     func prepareResponsePanel() {
         streamingResponseText = ""
         isResponsePanelStreaming = true
-        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+        NotificationCenter.default.post(name: .pinkyShowPanel, object: nil)
     }
 
     func finishResponsePanelStream() {
@@ -1078,7 +1149,7 @@ final class CompanionManager: ObservableObject {
                 print("🔊 TTS interrupted")
                 return
             }
-            ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+            PinkyAnalytics.trackTTSError(error: error.localizedDescription)
             print("⚠️ ElevenLabs TTS error: \(error)")
             speakCreditsErrorFallback()
         }
@@ -1096,15 +1167,15 @@ final class CompanionManager: ObservableObject {
                 userTranscript: transcript,
                 assistantResponse: spokenText
             )
-            ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+            PinkyAnalytics.trackAIResponseReceived(response: spokenText)
             try await speakAndStreamToPanel(spokenText, responseEpochAtStart: responseEpochAtStart)
             finishResponsePanelStream()
             return
         }
 
         let routeContext = CompanionVoiceRouteContext(
-            uploadedDocumentCount: playbookManager.playbookCount,
-            workflowScreenCount: playbookManager.playbooks.reduce(0) { $0 + $1.stepCount }
+            uploadedDocumentCount: skillManager.skillCount,
+            workflowScreenCount: skillManager.skills.reduce(0) { $0 + $1.playbackSteps.count }
         )
 
         let decision = CompanionVoiceRouter.resolve(
@@ -1163,7 +1234,7 @@ final class CompanionManager: ObservableObject {
     ) async throws {
         guard let pending = sessionPlanningService.pendingClarification else { return }
 
-        if ClickyVoiceSessionPhrases.isCancel(transcript) {
+        if PinkyVoiceSessionPhrases.isCancel(transcript) {
             sessionPlanningService.clearPendingClarification()
             try await deliverTextOnlyResponse(
                 transcript: transcript,
@@ -1241,7 +1312,7 @@ final class CompanionManager: ObservableObject {
             userTranscript: transcript,
             assistantResponse: "let me break this down."
         )
-        ClickyAnalytics.trackAIResponseReceived(response: "let me break this down.")
+        PinkyAnalytics.trackAIResponseReceived(response: "let me break this down.")
 
         voiceState = .processing
 
@@ -1301,7 +1372,7 @@ final class CompanionManager: ObservableObject {
             guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
 
             appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: spokenText)
-            ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+            PinkyAnalytics.trackAIResponseReceived(response: spokenText)
             try await speakAndStreamToPanel(spokenText, responseEpochAtStart: responseEpochAtStart)
             finishResponsePanelStream()
 
@@ -1388,19 +1459,19 @@ final class CompanionManager: ObservableObject {
 
     private func deliverAppActionResponse(
         transcript: String,
-        action: ClickyAppAction,
+        action: PinkyAppAction,
         responseEpochAtStart: Int
     ) async throws {
         guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
 
-        let spokenText = await ClickyAppActionExecutor.execute(
+        let spokenText = await PinkyAppActionExecutor.execute(
             action,
             context: makeCapabilityContext()
         )
         guard !Task.isCancelled, responseEpochAtStart == responseEpoch else { return }
 
         appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: spokenText)
-        ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+        PinkyAnalytics.trackAIResponseReceived(response: spokenText)
 
         try await speakAndStreamToPanel(spokenText, responseEpochAtStart: responseEpochAtStart)
         finishResponsePanelStream()
@@ -1454,14 +1525,14 @@ final class CompanionManager: ObservableObject {
                 on: cursorScreenCapture
             )
             publishElementPoint(renderedPoint)
-            ClickyAnalytics.trackElementPointed(elementLabel: renderedPoint.label)
+            PinkyAnalytics.trackElementPointed(elementLabel: renderedPoint.label)
             print("🎯 Element pointing: (\(pointTarget.x), \(pointTarget.y)) → \"\(renderedPoint.label)\"")
         } else {
             print("🎯 Element pointing: none")
         }
 
         appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: spokenText)
-        ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+        PinkyAnalytics.trackAIResponseReceived(response: spokenText)
 
         if let panelPayload = result.panelPayload {
             resultWindowManager?.show(panelPayload)
@@ -1497,13 +1568,13 @@ final class CompanionManager: ObservableObject {
         return context
     }
 
-    private func noteCopyableContentDelivered(_ payload: ClickyCopyableContentPayload) {
+    private func noteCopyableContentDelivered(_ payload: PinkyCopyableContentPayload) {
         lastCopyableDeliveryHistoryIndex = conversationHistory.count
         lastCopyableKind = payload.kind
     }
 
     private func walkthroughRoutingContext() -> CompanionWalkthroughRoutingContext {
-        let recentCopyableKind: ClickyCopyableContentPayload.Kind?
+        let recentCopyableKind: PinkyCopyableContentPayload.Kind?
         if let deliveryIndex = lastCopyableDeliveryHistoryIndex,
            conversationHistory.count - deliveryIndex <= 2 {
             recentCopyableKind = lastCopyableKind
@@ -1574,7 +1645,7 @@ final class CompanionManager: ObservableObject {
 
         let trimmedSpokenText = spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
         appendExchangeToConversationHistory(userTranscript: transcript, assistantResponse: trimmedSpokenText)
-        ClickyAnalytics.trackAIResponseReceived(response: trimmedSpokenText)
+        PinkyAnalytics.trackAIResponseReceived(response: trimmedSpokenText)
 
         guard !trimmedSpokenText.isEmpty else {
             finishResponsePanelStream()
@@ -1614,7 +1685,7 @@ final class CompanionManager: ObservableObject {
                 print("🔊 TTS interrupted")
                 return
             }
-            ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+            PinkyAnalytics.trackTTSError(error: error.localizedDescription)
             print("⚠️ ElevenLabs TTS error: \(error)")
             speakCreditsErrorFallback()
         }
@@ -1664,7 +1735,7 @@ final class CompanionManager: ObservableObject {
     /// In transient mode (default), waits for TTS and pointing to finish, then
     /// fades out the overlay half a second after the buddy is done.
     private func scheduleTransientHideIfNeeded() {
-        guard !isClickyCursorEnabled && isOverlayVisible else { return }
+        guard !isPinkyCursorEnabled && isOverlayVisible else { return }
 
         transientHideTask?.cancel()
         transientHideTask = Task {
@@ -1683,9 +1754,11 @@ final class CompanionManager: ObservableObject {
 
     /// True while the overlay should stay up for an in-flight voice or pointing interaction.
     private var isOverlayInteractionActive: Bool {
-        showOnboardingVideo
-            || showOnboardingPrompt
+        showOnboardingPrompt
             || isWalkthroughActive
+            || isTeaching
+            || isTeachingProcessing
+            || skillManager.pendingDraft != nil
             || globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed
             || voiceState != .idle
             || currentResponseTask != nil
@@ -1700,81 +1773,17 @@ final class CompanionManager: ObservableObject {
     /// credits run out. Uses NSSpeechSynthesizer so it works even when
     /// ElevenLabs is down.
     private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+        let utterance = "I'm all out of API credits. Please check your Cloudflare Worker and API keys."
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
     }
 
-    // MARK: - Onboarding Video
+    // MARK: - Onboarding Prompt
 
-    /// Sets up the onboarding video player, starts playback, and schedules
-    /// the demo interaction at 40s. Called by BlueCursorView when onboarding starts.
-    func setupOnboardingVideo() {
-        guard let videoURL = URL(string: "https://stream.mux.com/e5jB8UuSrtFABVnTHCR7k3sIsmcUHCyhtLu1tzqLlfs.m3u8") else { return }
-
-        let player = AVPlayer(url: videoURL)
-        player.isMuted = false
-        player.volume = 0.0
-        self.onboardingVideoPlayer = player
-        self.showOnboardingVideo = true
-        self.onboardingVideoOpacity = 0.0
-
-        // Start playback immediately — the video plays while invisible,
-        // then we fade in both the visual and audio over 1s.
-        player.play()
-
-        // Wait for SwiftUI to mount the view, then set opacity to 1.
-        // The .animation modifier on the view handles the actual animation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.onboardingVideoOpacity = 1.0
-            // Fade audio volume from 0 → 1 over 2s to match visual fade
-            self.fadeInVideoAudio(player: player, targetVolume: 1.0, duration: 2.0)
-        }
-
-        // At 40 seconds into the video, trigger the onboarding demo where
-        // Clicky flies to something interesting on screen and comments on it
-        let demoTriggerTime = CMTime(seconds: 40, preferredTimescale: 600)
-        onboardingDemoTimeObserver = player.addBoundaryTimeObserver(
-            forTimes: [NSValue(time: demoTriggerTime)],
-            queue: .main
-        ) { [weak self] in
-            ClickyAnalytics.trackOnboardingDemoTriggered()
-            self?.performOnboardingDemoInteraction()
-        }
-
-        // Fade out and clean up when the video finishes
-        onboardingVideoEndObserver = NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.didPlayToEndTimeNotification,
-            object: player.currentItem,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            ClickyAnalytics.trackOnboardingVideoCompleted()
-            self.onboardingVideoOpacity = 0.0
-            // Wait for the 2s fade-out animation to complete before tearing down
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.tearDownOnboardingVideo()
-                // After the video disappears, stream in the prompt to try talking
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self.startOnboardingPromptStream()
-                }
-            }
-        }
-    }
-
-    func tearDownOnboardingVideo() {
-        showOnboardingVideo = false
-        if let timeObserver = onboardingDemoTimeObserver {
-            onboardingVideoPlayer?.removeTimeObserver(timeObserver)
-            onboardingDemoTimeObserver = nil
-        }
-        onboardingVideoPlayer?.pause()
-        onboardingVideoPlayer = nil
-        if let observer = onboardingVideoEndObserver {
-            NotificationCenter.default.removeObserver(observer)
-            onboardingVideoEndObserver = nil
-        }
+    /// Called by the overlay when the welcome animation finishes.
+    func finishWelcomeAnimation() {
+        startOnboardingPromptStream()
     }
 
     private func startOnboardingPromptStream() {
@@ -1811,57 +1820,4 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Gradually raises an AVPlayer's volume from its current level to the
-    /// target over the specified duration, creating a smooth audio fade-in.
-    private func fadeInVideoAudio(player: AVPlayer, targetVolume: Float, duration: Double) {
-        let steps = 20
-        let stepInterval = duration / Double(steps)
-        let volumeIncrement = (targetVolume - player.volume) / Float(steps)
-        var stepsRemaining = steps
-
-        Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { timer in
-            stepsRemaining -= 1
-            player.volume += volumeIncrement
-
-            if stepsRemaining <= 0 {
-                timer.invalidate()
-                player.volume = targetVolume
-            }
-        }
-    }
-
-    // MARK: - Onboarding Demo Interaction
-
-    /// Captures a screenshot and asks Claude to find something interesting to
-    /// point at, then triggers the buddy's flight animation. Used during
-    /// onboarding to demo the pointing feature while the intro video plays.
-    func performOnboardingDemoInteraction() {
-        guard voiceState == .idle || voiceState == .responding else { return }
-
-        Task {
-            do {
-                let cursorScreenCapture = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
-                let agentResult = try await turnService.runOnboardingDemoTurn(
-                    cursorScreenCapture: cursorScreenCapture,
-                    model: selectedModel,
-                    capabilityContext: makeCapabilityContext(screenCapture: cursorScreenCapture)
-                )
-
-                guard let pointTarget = agentResult.pointTarget else {
-                    print("🎯 Onboarding demo: no element to point at")
-                    return
-                }
-
-                let renderedPoint = CompanionPointRenderer.render(
-                    pointTarget: pointTarget,
-                    on: cursorScreenCapture
-                )
-
-                publishElementPoint(renderedPoint, bubbleText: agentResult.spokenText)
-                print("🎯 Onboarding demo: pointing at \"\(renderedPoint.label)\" — \"\(agentResult.spokenText)\"")
-            } catch {
-                print("⚠️ Onboarding demo error: \(error)")
-            }
-        }
-    }
 }

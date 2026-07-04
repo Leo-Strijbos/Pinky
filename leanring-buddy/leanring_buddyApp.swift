@@ -29,24 +29,24 @@ struct leanring_buddyApp: App {
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
-    private var resultWindowManager: ClickyResultWindowManager?
-    private var documentWindowManager: ClickyDocumentWindowManager?
-    private var copyableContentWindowManager: ClickyCopyableContentWindowManager?
+    private var resultWindowManager: PinkyResultWindowManager?
+    private var documentWindowManager: PinkyDocumentWindowManager?
+    private var copyableContentWindowManager: PinkyCopyableContentWindowManager?
     private let companionManager = CompanionManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🎯 Clicky: Starting...")
-        print("🎯 Clicky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+        print("🎯 Pinky: Starting...")
+        print("🎯 Pinky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
 
-        ClickyAnalytics.configure()
-        ClickyAnalytics.trackAppOpened()
+        PinkyAnalytics.configure()
+        PinkyAnalytics.trackAppOpened()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
-        resultWindowManager = ClickyResultWindowManager()
-        let documentWindowManager = ClickyDocumentWindowManager()
-        let copyableContentWindowManager = ClickyCopyableContentWindowManager()
+        resultWindowManager = PinkyResultWindowManager()
+        let documentWindowManager = PinkyDocumentWindowManager()
+        let copyableContentWindowManager = PinkyCopyableContentWindowManager()
         companionManager.resultWindowManager = resultWindowManager
         companionManager.documentWindowManager = documentWindowManager
         companionManager.copyableContentWindowManager = copyableContentWindowManager
@@ -74,9 +74,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if loginItemService.status != .enabled {
             do {
                 try loginItemService.register()
-                print("🎯 Clicky: Registered as login item")
+                print("🎯 Pinky: Registered as login item")
             } catch {
-                print("⚠️ Clicky: Failed to register as login item: \(error)")
+                print("⚠️ Pinky: Failed to register as login item: \(error)")
             }
         }
     }

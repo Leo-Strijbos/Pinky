@@ -18,7 +18,7 @@ struct CompanionVoiceRouteDecision: Equatable {
     let route: CompanionVoiceRoute
     let reason: String
     let confidence: Double
-    let appAction: ClickyAppAction?
+    let appAction: PinkyAppAction?
     let cannedResponse: String?
 }
 
@@ -39,7 +39,7 @@ enum CompanionVoiceRouter {
     ) -> CompanionVoiceRouteDecision {
         _ = context
 
-        if let canned = ClickyVoiceQuickLocalResponses.match(transcript: transcript) {
+        if let canned = PinkyVoiceQuickLocalResponses.match(transcript: transcript) {
             return CompanionVoiceRouteDecision(
                 route: .quickLocal,
                 reason: "quick-local",
@@ -49,7 +49,7 @@ enum CompanionVoiceRouter {
             )
         }
 
-        if let appAction = ClickyVoiceLocalAppActionParser.parse(transcript: transcript) {
+        if let appAction = PinkyVoiceLocalAppActionParser.parse(transcript: transcript) {
             return CompanionVoiceRouteDecision(
                 route: .appAction,
                 reason: appActionReason(appAction),
@@ -59,7 +59,7 @@ enum CompanionVoiceRouter {
             )
         }
 
-        if ClickyVoiceIntroPhrases.matches(transcript: transcript) {
+        if PinkyVoiceIntroPhrases.matches(transcript: transcript) {
             return CompanionVoiceRouteDecision(
                 route: .intro,
                 reason: "intro-meta",
@@ -78,7 +78,7 @@ enum CompanionVoiceRouter {
         )
     }
 
-    private static func appActionReason(_ action: ClickyAppAction) -> String {
+    private static func appActionReason(_ action: PinkyAppAction) -> String {
         switch action {
         case .openApp(let appName):
             return "app-action.open-app.\(appName)"
