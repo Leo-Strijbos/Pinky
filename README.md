@@ -2,6 +2,10 @@
 
 Pinky is a macOS menu bar companion that watches your screen, walks you through workflows step by step, and turns what you do into reusable skill files. Teach it a process on your screen, then ask it to guide you through that workflow later — or export the result as a skill file for other AI tools.
 
+## Credits
+
+This project is based on [Farza's Clicky](https://github.com/farzaa/clicky). The original open-source macOS screen companion is his work — we're building on top of it here.
+
 ## What it does
 
 - **Teach workflows on your screen** — click **Teach me**, perform the steps, and Pinky captures what you do.
@@ -108,10 +112,6 @@ worker/                  # Cloudflare Worker proxy
   src/index.ts              # Routes: /chat, /tts, /transcribe-token
 CLAUDE.md                # Full architecture doc
 ```
-
-## Credits
-
-This project is based on [Farza's Clicky](https://github.com/farzaa/clicky). The original open-source macOS screen companion is his work — we're building on top of it here.
 
 ## License
 
