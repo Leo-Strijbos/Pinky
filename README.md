@@ -4,7 +4,7 @@ Pinky is a macOS menu bar companion that watches your screen, walks you through 
 
 ## Credits
 
-This project is based on [Farza's Clicky](https://github.com/farzaa/clicky). The original open-source macOS screen companion is his work — we're building on top of it here.
+This project is based on [Farza's Clicky](https://github.com/farzaa/clicky). The original open-source macOS screen companion is his work — I've extended it.
 
 ## What it does
 
